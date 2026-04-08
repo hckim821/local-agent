@@ -1,0 +1,16 @@
+{
+  "name": "local-agents-desktop",
+  "version": "1.0.0",
+  "description": "Local AI Assistant Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "dependencies": {
+    "electron": "^30.0.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.0.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "local-agents",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "cd apps/frontend && npm run dev",
+    "dev:desktop": "cd apps/desktop && npm run dev",
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:desktop\"",
+    "install:all": "cd apps/frontend && npm install && cd ../desktop && npm install",
+    "build:frontend": "cd apps/frontend && npm run build"
+  },
+  "devDependencies": {
+    "concurrently": "^8.0.0"
+  }
+}
