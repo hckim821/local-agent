@@ -182,13 +182,14 @@ async function handleSend() {
   const text = inputText.value.trim()
   if (!text || store.isLoading) return
   inputText.value = ''
+  await nextTick()
   await store.sendMessage(text)
 }
 
-function handleKeydown(e: KeyboardEvent) {
+async function handleKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    handleSend()
+    await handleSend()
   }
 }
 

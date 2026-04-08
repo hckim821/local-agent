@@ -24,7 +24,7 @@ export async function resetChat(settings: Settings) {
   await client.post('/api/chat/reset')
 }
 
-// Streaming chat - returns EventSource-compatible fetch
+// Streaming chat via SSE with proper partial-chunk handling
 export async function* streamChat(
   messages: Array<{role: string, content: string}>,
   settings: Settings
@@ -43,26 +43,40 @@ export async function* streamChat(
     })
   })
 
+  if (!response.ok) {
+    throw new Error(`서버 오류: ${response.status} ${response.statusText}`)
+  }
+
   const reader = response.body!.getReader()
   const decoder = new TextDecoder()
+  // Accumulate across TCP reads to handle partial SSE lines
+  let buffer = ''
 
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
 
-    const chunk = decoder.decode(value)
-    const lines = chunk.split('\n')
+    buffer += decoder.decode(value, { stream: true })
+
+    // Process all complete lines from the buffer
+    const lines = buffer.split('\n')
+    // Keep the last (possibly incomplete) line in the buffer
+    buffer = lines.pop() ?? ''
 
     for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6).trim()
-        if (data === '[DONE]') return
-        try {
-          const parsed = JSON.parse(data)
-          if (parsed.content) yield parsed.content
-          if (parsed.skill_result) yield JSON.stringify({ type: 'skill_result', ...parsed.skill_result })
-        } catch {}
-      }
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      if (data === '[DONE]') return
+      try {
+        const parsed = JSON.parse(data)
+        if (parsed.error) {
+          yield `\n⚠️ 오류: ${parsed.error}`
+          return
+        }
+        if (parsed.done && !parsed.content) return
+        if (parsed.content) yield parsed.content
+        if (parsed.skill_result) yield JSON.stringify({ type: 'skill_result', ...parsed.skill_result })
+      } catch {}
     }
   }
 }

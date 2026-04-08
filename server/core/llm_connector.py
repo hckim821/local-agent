@@ -14,35 +14,25 @@ class LLMConnector:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    async def chat(
+    def _url(self) -> str:
+        base = self.endpoint_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    async def blocking_chat(
         self,
         messages: list,
         model: str,
         tools: list | None = None,
-        stream: bool = False,
-    ):
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-        }
+    ) -> dict:
+        """Non-streaming call. Returns {"content": str, "tool_calls": [...]}."""
+        payload = {"model": model, "messages": messages, "stream": False}
         if tools:
             payload["tools"] = tools
 
-        base = self.endpoint_url.rstrip("/")
-        if base.endswith("/v1"):
-            url = f"{base}/chat/completions"
-        else:
-            url = f"{base}/v1/chat/completions"
-
-        if stream:
-            return self._stream_chat(url, payload)
-        else:
-            return await self._blocking_chat(url, payload)
-
-    async def _blocking_chat(self, url: str, payload: dict) -> dict:
         async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(url, headers=self._headers(), json=payload)
+            response = await client.post(self._url(), headers=self._headers(), json=payload)
             response.raise_for_status()
             data = response.json()
 
@@ -51,36 +41,84 @@ class LLMConnector:
         content = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
 
-        parsed_tool_calls = []
+        parsed = []
         for tc in tool_calls:
             try:
                 args = json.loads(tc["function"]["arguments"])
             except (json.JSONDecodeError, KeyError):
                 args = {}
-            parsed_tool_calls.append({
+            parsed.append({
                 "id": tc.get("id", ""),
                 "name": tc["function"]["name"],
                 "arguments": args,
             })
 
-        return {"content": content, "tool_calls": parsed_tool_calls}
+        return {"content": content, "tool_calls": parsed}
 
-    async def _stream_chat(self, url: str, payload: dict) -> AsyncGenerator[dict, None]:
+    async def stream_tokens(
+        self,
+        messages: list,
+        model: str,
+        tools: list | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        True streaming call. Yields dicts:
+          {"type": "content", "value": str}   — one token from the LLM
+          {"type": "tool_calls", "value": [...]} — accumulated tool calls at end of stream
+        """
+        payload = {"model": model, "messages": messages, "stream": True}
+        if tools:
+            payload["tools"] = tools
+
+        # Accumulate tool call deltas across chunks
+        # key: index, value: {"id", "name", "arguments_str"}
+        tc_acc: dict[int, dict] = {}
+
         async with httpx.AsyncClient(timeout=120) as client:
-            async with client.stream("POST", url, headers=self._headers(), json=payload) as response:
+            async with client.stream(
+                "POST", self._url(), headers=self._headers(), json=payload
+            ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
-                    raw = line[6:]
-                    if raw.strip() == "[DONE]":
+                    raw = line[6:].strip()
+                    if raw == "[DONE]":
                         break
                     try:
                         chunk = json.loads(raw)
                         choice = chunk["choices"][0]
                         delta = choice.get("delta", {})
+
+                        # --- content token ---
                         content = delta.get("content")
                         if content:
-                            yield {"content": content, "tool_calls": []}
+                            yield {"type": "content", "value": content}
+
+                        # --- tool call delta ---
+                        for tc_delta in delta.get("tool_calls", []):
+                            idx = tc_delta.get("index", 0)
+                            if idx not in tc_acc:
+                                tc_acc[idx] = {"id": "", "name": "", "arguments_str": ""}
+                            if tc_delta.get("id"):
+                                tc_acc[idx]["id"] = tc_delta["id"]
+                            fn = tc_delta.get("function", {})
+                            if fn.get("name"):
+                                tc_acc[idx]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                tc_acc[idx]["arguments_str"] += fn["arguments"]
+
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+
+        # Emit accumulated tool calls once at the end
+        if tc_acc:
+            parsed = []
+            for idx in sorted(tc_acc.keys()):
+                tc = tc_acc[idx]
+                try:
+                    args = json.loads(tc["arguments_str"]) if tc["arguments_str"] else {}
+                except json.JSONDecodeError:
+                    args = {}
+                parsed.append({"id": tc["id"], "name": tc["name"], "arguments": args})
+            yield {"type": "tool_calls", "value": parsed}

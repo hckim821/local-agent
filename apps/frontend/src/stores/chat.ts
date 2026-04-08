@@ -32,37 +32,38 @@ export const useChatStore = defineStore('chat', () => {
     messages.value.push(userMsg)
     isLoading.value = true
 
-    const assistantMsg: Message = {
+    messages.value.push({
       id: (Date.now() + 1).toString(),
       role: 'assistant',
       content: '',
       timestamp: new Date(),
       isStreaming: true
-    }
-    messages.value.push(assistantMsg)
+    })
+    // Use the reactive proxy that Vue created inside the array
+    const assistantIdx = messages.value.length - 1
 
     try {
       const apiMessages = messages.value
-        .filter(m => m.id !== assistantMsg.id)
+        .slice(0, assistantIdx)
         .map(m => ({ role: m.role, content: m.content }))
 
       for await (const chunk of streamChat(apiMessages, settings.value)) {
         if (chunk.startsWith('{"type":"skill_result"')) {
           const result = JSON.parse(chunk)
-          assistantMsg.skillResult = {
+          messages.value[assistantIdx].skillResult = {
             status: result.status,
             skillName: result.skillName || '',
             message: result.message,
             data: result.data
           }
         } else {
-          assistantMsg.content += chunk
+          messages.value[assistantIdx].content += chunk
         }
       }
     } catch (error: unknown) {
-      assistantMsg.content = `오류가 발생했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`
+      messages.value[assistantIdx].content = `오류가 발생했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`
     } finally {
-      assistantMsg.isStreaming = false
+      messages.value[assistantIdx].isStreaming = false
       isLoading.value = false
     }
   }
@@ -74,7 +75,8 @@ export const useChatStore = defineStore('chat', () => {
 
   async function loadSkills() {
     try {
-      skills.value = await fetchSkills()
+      const data = await fetchSkills()
+      skills.value = data.skills ?? []
     } catch {}
   }
 

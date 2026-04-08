@@ -37,6 +37,9 @@ local-agents/
 │   ├── core/
 │   │   ├── llm_connector.py       # OpenAI-compatible LLM 프록시
 │   │   └── orchestrator.py        # Tool-call 에이전트 루프
+│   ├── browsers/                  # 로컬 Chromium (git 제외, 수동 설치)
+│   │   └── chrome-win64/
+│   │       └── chrome.exe
 │   └── skills/                    # 스킬 레지스트리 (자동 로드)
 │       ├── __init__.py            # 폴더 스캔 → 자동 등록
 │       ├── skill_base.py          # SkillBase 추상 클래스
@@ -60,8 +63,38 @@ local-agents/
 ```bash
 cd server
 pip install -r requirements.txt
+```
+
+**Chromium 설치** — 인터넷 환경에 따라 아래 두 방법 중 선택합니다.
+
+**방법 A. 자동 설치 (외부망 접근 가능 시)**
+```bash
 playwright install chromium
 ```
+
+**방법 B. 수동 설치 (사내망 등 제한 환경)**
+
+아래 URL에서 zip을 다운로드한 뒤 `server/browsers/`에 압축 해제합니다.
+
+```
+https://cdn.playwright.dev/builds/cft/147.0.7727.15/win64/chrome-win64.zip
+```
+
+PowerShell:
+```powershell
+# 프로젝트 루트에서 실행
+Expand-Archive -Path "chrome-win64.zip" -DestinationPath "server\browsers\"
+```
+
+압축 해제 후 구조:
+```
+server/browsers/
+└── chrome-win64/
+    ├── chrome.exe   ← 이 파일이 있어야 함
+    └── ...
+```
+
+> `server/browsers/`는 `.gitignore`에 등록되어 있어 git에 포함되지 않습니다.
 
 ### 2. Node.js 의존성
 
@@ -111,6 +144,22 @@ cd apps/desktop && npx electron . --dev
 ```bash
 ollama pull llama3
 ollama serve
+```
+
+## Chromium 경로 우선순위
+
+`analyze_equipment` 스킬 실행 시 아래 순서로 Chromium 실행 파일을 탐색합니다.
+
+| 우선순위 | 방법 | 설정 방법 |
+|---|---|---|
+| 1 | 환경변수 | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=C:\path\to\chrome.exe` |
+| 2 | 로컬 설치 | `server/browsers/chrome-win64/chrome.exe` |
+| 3 | Playwright 기본 경로 | `playwright install chromium` 실행 시 자동 설정 |
+
+환경변수로 지정하려면:
+```bat
+set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=C:\path\to\chrome.exe
+python server\main.py
 ```
 
 ## Skills System

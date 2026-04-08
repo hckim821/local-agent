@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -13,6 +14,13 @@ import asyncio
 
 from skills import skill_registry
 from core.orchestrator import Orchestrator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 
 app = FastAPI(title="Local LLM Computer-Use API")
 
@@ -29,8 +37,11 @@ orchestrator = Orchestrator()
 
 @app.on_event("startup")
 async def startup_event():
-    skill_registry.load_skills()
-    print("[Server] Skills loaded.")
+    try:
+        skill_registry.load_skills()
+        logging.info(f"Skills loaded: {[s['name'] for s in skill_registry.list_all()]}")
+    except Exception as e:
+        logging.error(f"Skill loading failed: {e}")
 
 
 class ChatRequest(BaseModel):
@@ -45,7 +56,8 @@ class SkillRunRequest(BaseModel):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    logging.info("[Health] ping")
+    return {"status": "ok", "skills": [s["name"] for s in skill_registry.list_all()]}
 
 
 @app.post("/api/chat")
@@ -65,6 +77,8 @@ async def chat(
             user_content = msg.get("content", "")
             break
 
+    logging.info(f"[Chat] endpoint={endpoint_url} model={body.model} user={user_content[:80]!r}")
+
     if body.stream:
         async def event_stream():
             try:
@@ -80,7 +94,9 @@ async def chat(
                     payload = json.dumps({"content": chunk, "done": False})
                     yield f"data: {payload}\n\n"
                 yield f"data: {json.dumps({'content': '', 'done': True})}\n\n"
+                logging.info("[Chat] stream completed")
             except Exception as e:
+                logging.error(f"[Chat] stream error: {e}")
                 yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
