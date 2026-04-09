@@ -111,11 +111,23 @@ class Orchestrator:
                     yield f"\n![스크린샷](data:image/png;base64,{b64})\n"
 
                 logging.info(f"[Skill] Result: {tool_result}")
-                self._context.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": json.dumps(tool_result, ensure_ascii=False),
-                })
+
+                # 이미지가 있으면 멀티모달 content로 context에 포함 → LLM이 이미지 분석 가능
+                if b64:
+                    self._context.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": [
+                            {"type": "text", "text": json.dumps(tool_result, ensure_ascii=False)},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                        ],
+                    })
+                else:
+                    self._context.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps(tool_result, ensure_ascii=False),
+                    })
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -147,9 +159,20 @@ class Orchestrator:
                 except Exception as e:
                     result = {"error": str(e)}
 
-            result.pop("image_base64", None)  # base64는 context에 저장하지 않음
-            self._context.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": json.dumps(result, ensure_ascii=False),
-            })
+            # 이미지가 있으면 멀티모달 content로 context에 포함 → LLM이 이미지 분석 가능
+            b64 = result.pop("image_base64", None)
+            if b64:
+                self._context.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": [
+                        {"type": "text", "text": json.dumps(result, ensure_ascii=False)},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    ],
+                })
+            else:
+                self._context.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
