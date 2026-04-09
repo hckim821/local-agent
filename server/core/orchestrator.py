@@ -19,10 +19,22 @@ class Orchestrator:
         model: str,
         skill_registry,
         stream: bool = False,
+        image: str | None = None,
     ):
-        self._context.append({"role": "user", "content": user_message})
+        if image:
+            # Build OpenAI vision multimodal content
+            content: list | str = [
+                {"type": "text", "text": user_message or "이 이미지를 분석해줘."},
+                {"type": "image_url", "image_url": {"url": image}},
+            ]
+            logging.info("[Orchestrator] Multimodal message (image attached)")
+        else:
+            content = user_message
+
+        self._context.append({"role": "user", "content": content})
         connector = LLMConnector(endpoint_url, api_key)
-        tools = skill_registry.to_tools() or None
+        # Don't pass tools for vision requests — most local models don't support both
+        tools = None if image else (skill_registry.to_tools() or None)
 
         if stream:
             return self._stream_loop(connector, model, tools, skill_registry)

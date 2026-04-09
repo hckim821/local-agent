@@ -14,6 +14,14 @@
 
     <!-- Message content -->
     <div class="flex flex-col max-w-[75%]" :class="isUser ? 'items-end' : 'items-start'">
+      <!-- Attached image (user messages) -->
+      <img
+        v-if="message.image"
+        :src="message.image"
+        class="mb-2 max-w-[260px] max-h-[200px] rounded-xl object-contain border border-gray-700"
+        alt="첨부 이미지"
+      />
+
       <!-- Bubble -->
       <div
         class="px-4 py-3 rounded-2xl text-sm leading-relaxed"

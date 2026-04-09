@@ -48,6 +48,7 @@ class ChatRequest(BaseModel):
     messages: list[dict]
     model: str = "gpt-4"
     stream: bool = False
+    image: str | None = None  # base64 data URL from frontend paste
 
 
 class SkillRunRequest(BaseModel):
@@ -89,6 +90,7 @@ async def chat(
                     model=body.model,
                     skill_registry=skill_registry,
                     stream=True,
+                    image=body.image,
                 )
                 async for chunk in gen:
                     payload = json.dumps({"content": chunk, "done": False})
@@ -109,6 +111,7 @@ async def chat(
                 model=body.model,
                 skill_registry=skill_registry,
                 stream=False,
+                image=body.image,
             )
             return {"content": result, "done": True}
         except Exception as e:

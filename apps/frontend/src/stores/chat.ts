@@ -20,13 +20,14 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('llm_model', settings.value.model)
   }
 
-  async function sendMessage(content: string) {
-    if (isLoading.value || !content.trim()) return
+  async function sendMessage(content: string, image?: string) {
+    if (isLoading.value || (!content.trim() && !image)) return
 
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      content,
+      content: content || (image ? '(이미지 첨부)' : ''),
+      image,
       timestamp: new Date()
     }
     messages.value.push(userMsg)
@@ -47,7 +48,7 @@ export const useChatStore = defineStore('chat', () => {
         .slice(0, assistantIdx)
         .map(m => ({ role: m.role, content: m.content }))
 
-      for await (const chunk of streamChat(apiMessages, settings.value)) {
+      for await (const chunk of streamChat(apiMessages, settings.value, image)) {
         if (chunk.startsWith('{"type":"skill_result"')) {
           const result = JSON.parse(chunk)
           messages.value[assistantIdx].skillResult = {

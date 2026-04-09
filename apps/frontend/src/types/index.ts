@@ -2,6 +2,7 @@ export interface Message {
   id: string
   role: 'user' | 'assistant' | 'tool'
   content: string
+  image?: string          // base64 data URL (user messages only)
   timestamp: Date
   isStreaming?: boolean
   toolCalls?: ToolCall[]

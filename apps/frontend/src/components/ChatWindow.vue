@@ -87,18 +87,35 @@
           class="px-4 py-3 border-t border-gray-800 bg-[#13151f]"
           style="flex-shrink: 0;"
         >
+          <!-- Image preview -->
+          <div v-if="attachedImage" class="mb-2 flex items-start gap-2">
+            <div class="relative inline-block">
+              <img
+                :src="attachedImage"
+                class="max-h-24 max-w-[180px] rounded-lg object-contain border border-gray-700"
+                alt="첨부 이미지"
+              />
+              <button
+                class="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-gray-600 hover:bg-gray-500 text-white text-xs flex items-center justify-center leading-none"
+                @click="attachedImage = null"
+              >✕</button>
+            </div>
+            <span class="text-xs text-gray-500 mt-1">이미지 첨부됨</span>
+          </div>
+
           <div class="flex gap-2 items-end">
             <a-textarea
               v-model:value="inputText"
-              placeholder="Type a message... (Enter to send, Shift+Enter for newline)"
+              placeholder="Type a message... (Enter to send, Shift+Enter for newline, Ctrl+V로 이미지 첨부)"
               :auto-size="{ minRows: 1, maxRows: 6 }"
               :disabled="store.isLoading"
               class="flex-1 chat-input"
               @keydown="handleKeydown"
+              @paste="handlePaste"
             />
             <a-button
               type="primary"
-              :disabled="store.isLoading || !inputText.trim()"
+              :disabled="store.isLoading || (!inputText.trim() && !attachedImage)"
               :loading="store.isLoading"
               class="send-btn"
               @click="handleSend"
@@ -151,6 +168,7 @@ import MessageItem from './MessageItem.vue'
 
 const store = useChatStore()
 const inputText = ref('')
+const attachedImage = ref<string | null>(null)
 const messagesContainer = ref<HTMLDivElement | null>(null)
 const showSkillsPanel = ref(false)
 
@@ -178,12 +196,33 @@ watch(
   () => scrollToBottom()
 )
 
+function handlePaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const item of Array.from(items)) {
+    if (item.type.startsWith('image/')) {
+      e.preventDefault()
+      const file = item.getAsFile()
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = (ev) => {
+        attachedImage.value = ev.target?.result as string
+      }
+      reader.readAsDataURL(file)
+      return
+    }
+  }
+}
+
 async function handleSend() {
   const text = inputText.value.trim()
-  if (!text || store.isLoading) return
+  const image = attachedImage.value
+  if (!text && !image) return
+  if (store.isLoading) return
   inputText.value = ''
+  attachedImage.value = null
   await nextTick()
-  await store.sendMessage(text)
+  await store.sendMessage(text, image ?? undefined)
 }
 
 async function handleKeydown(e: KeyboardEvent) {

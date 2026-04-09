@@ -27,7 +27,8 @@ export async function resetChat(settings: Settings) {
 // Streaming chat via SSE with proper partial-chunk handling
 export async function* streamChat(
   messages: Array<{role: string, content: string}>,
-  settings: Settings
+  settings: Settings,
+  image?: string
 ): AsyncGenerator<string> {
   const response = await fetch(`${BASE_URL}/api/chat`, {
     method: 'POST',
@@ -39,7 +40,8 @@ export async function* streamChat(
     body: JSON.stringify({
       messages,
       model: settings.model,
-      stream: true
+      stream: true,
+      ...(image ? { image } : {})
     })
   })
 
