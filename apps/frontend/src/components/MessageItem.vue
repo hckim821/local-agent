@@ -24,23 +24,36 @@
 
       <!-- Bubble -->
       <div
-        class="px-4 py-3 rounded-2xl text-sm leading-relaxed"
+        class="px-4 py-3 rounded-2xl text-sm"
         :class="[
           isUser
             ? 'bg-blue-600 text-white rounded-tr-sm'
             : 'bg-[#1e2130] text-gray-200 rounded-tl-sm',
           'max-w-full'
         ]"
-        style="white-space: pre-wrap; word-break: break-word;"
       >
-        <span>{{ message.content }}</span>
-        <span
-          v-if="message.isStreaming"
-          class="inline-block w-0.5 h-4 bg-current ml-0.5 align-middle animate-pulse"
-        >|</span>
-        <span v-if="!message.content && message.isStreaming" class="text-gray-400 italic">
-          thinking...
-        </span>
+        <!-- User: plain text -->
+        <template v-if="isUser">
+          <span style="white-space: pre-wrap; word-break: break-word;">{{ message.content }}</span>
+        </template>
+
+        <!-- Assistant: markdown rendered -->
+        <template v-else>
+          <MarkdownContent
+            v-if="message.content"
+            :content="message.content"
+            :streaming="message.isStreaming"
+          />
+          <span
+            v-if="!message.content && message.isStreaming"
+            class="text-gray-400 italic text-sm"
+          >thinking...</span>
+          <!-- Streaming cursor -->
+          <span
+            v-if="message.isStreaming && message.content"
+            class="inline-block w-0.5 h-3.5 bg-gray-400 ml-0.5 align-middle animate-pulse"
+          />
+        </template>
       </div>
 
       <!-- Skill result card -->
@@ -93,6 +106,7 @@
 import { computed } from 'vue'
 import { UserOutlined, RobotOutlined, ApiOutlined } from '@ant-design/icons-vue'
 import type { Message } from '@/types'
+import MarkdownContent from './MarkdownContent.vue'
 
 const props = defineProps<{
   message: Message
