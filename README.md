@@ -199,6 +199,28 @@ class MySkill(SkillBase):
         return {"status": "success", "message": f"{target} 처리 완료"}
 ```
 
+### 스킬 직접 테스트 (LLM 없이)
+
+`server/test_skill.py`를 사용하면 LLM을 거치지 않고 스킬을 바로 실행할 수 있습니다.
+
+```bash
+cd server
+
+# 등록된 스킬 목록 + 파라미터 확인
+python test_skill.py
+
+# 파라미터 없이 실행
+python test_skill.py run_ees
+
+# 파라미터 전달 (key=value)
+python test_skill.py open_browser url=https://google.com
+
+# JSON 값 전달 (숫자, bool, 리스트, dict 지원)
+python test_skill.py my_skill count=3 flag=true items=[1,2,3]
+```
+
+결과는 JSON 형태로 출력됩니다.
+
 ## API Endpoints
 
 | Method | Endpoint | 설명 |

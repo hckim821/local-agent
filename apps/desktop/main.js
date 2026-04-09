@@ -1,6 +1,8 @@
 'use strict'
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage } = require('electron')
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell } = require('electron')
+const os = require('os')
+const fs = require('fs')
 const { spawn } = require('child_process')
 const path = require('path')
 
@@ -156,6 +158,17 @@ function registerIPC () {
   ipcMain.on('window-close', () => {
     // Honour tray-hide behaviour
     if (mainWindow) mainWindow.hide()
+  })
+
+  ipcMain.on('open-image', (_event, dataUrl) => {
+    try {
+      const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '')
+      const tmpPath = path.join(os.tmpdir(), `screenshot_${Date.now()}.png`)
+      fs.writeFileSync(tmpPath, Buffer.from(base64, 'base64'))
+      shell.openPath(tmpPath)
+    } catch (e) {
+      console.error('[desktop] open-image error:', e.message)
+    }
   })
 }
 

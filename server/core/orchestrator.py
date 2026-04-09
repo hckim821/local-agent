@@ -69,62 +69,53 @@ class Orchestrator:
     ) -> AsyncGenerator[str, None]:
         """
         Streams LLM tokens to the client as they arrive.
-        If tool calls are detected, executes them then streams the follow-up.
+        Tool calls are executed and the loop continues until the LLM returns no more tool calls.
         """
-        accumulated_content = ""
-        tool_calls = []
+        for _ in range(10):
+            accumulated_content = ""
+            tool_calls = []
 
-        # Forward each token immediately as it arrives from the LLM
-        async for event in connector.stream_tokens(
-            messages=self._context, model=model, tools=tools
-        ):
-            if event["type"] == "content":
-                token = event["value"]
-                accumulated_content += token
-                yield token
-            elif event["type"] == "tool_calls":
-                tool_calls = event["value"]
+            async for event in connector.stream_tokens(
+                messages=self._context, model=model, tools=tools
+            ):
+                if event["type"] == "content":
+                    token = event["value"]
+                    accumulated_content += token
+                    yield token
+                elif event["type"] == "tool_calls":
+                    tool_calls = event["value"]
 
-        # Save assistant turn to context
-        self._context.append(
-            self._build_assistant_msg(accumulated_content, tool_calls)
-        )
+            self._context.append(
+                self._build_assistant_msg(accumulated_content, tool_calls)
+            )
 
-        if not tool_calls:
-            return
+            if not tool_calls:
+                return
 
-        # Execute each skill and stream the final follow-up response
-        for tc in tool_calls:
-            yield f"\n\n⚙ 스킬 실행 중: **{tc['name']}**...\n"
-            logging.info(f"[Skill] Running {tc['name']} with {tc['arguments']}")
+            for tc in tool_calls:
+                yield f"\n\n⚙ 스킬 실행 중: **{tc['name']}**...\n"
+                logging.info(f"[Skill] Running {tc['name']} with {tc['arguments']}")
 
-            skill = skill_registry.get(tc["name"])
-            if skill is None:
-                tool_result = {"error": f"Skill '{tc['name']}' not found"}
-            else:
-                try:
-                    tool_result = await skill.run(**tc["arguments"])
-                except Exception as e:
-                    tool_result = {"error": str(e)}
+                skill = skill_registry.get(tc["name"])
+                if skill is None:
+                    tool_result = {"error": f"Skill '{tc['name']}' not found"}
+                else:
+                    try:
+                        tool_result = await skill.run(**tc["arguments"])
+                    except Exception as e:
+                        tool_result = {"error": str(e)}
 
-            logging.info(f"[Skill] Result: {tool_result}")
-            self._context.append({
-                "role": "tool",
-                "tool_call_id": tc["id"],
-                "content": json.dumps(tool_result, ensure_ascii=False),
-            })
+                # 스크린샷이면 이미지를 채팅창에 표시
+                b64 = tool_result.pop("image_base64", None)
+                if b64:
+                    yield f"\n![스크린샷](data:image/png;base64,{b64})\n"
 
-        # Stream the follow-up response after tool results
-        final_content = ""
-        async for event in connector.stream_tokens(
-            messages=self._context, model=model, tools=None
-        ):
-            if event["type"] == "content":
-                token = event["value"]
-                final_content += token
-                yield token
-
-        self._context.append({"role": "assistant", "content": final_content})
+                logging.info(f"[Skill] Result: {tool_result}")
+                self._context.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(tool_result, ensure_ascii=False),
+                })
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -156,6 +147,7 @@ class Orchestrator:
                 except Exception as e:
                     result = {"error": str(e)}
 
+            result.pop("image_base64", None)  # base64는 context에 저장하지 않음
             self._context.append({
                 "role": "tool",
                 "tool_call_id": tc["id"],

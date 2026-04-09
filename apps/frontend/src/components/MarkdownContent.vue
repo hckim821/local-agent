@@ -44,9 +44,40 @@ function attachCopyButtons() {
   })
 }
 
-// Re-attach buttons whenever html updates (streaming chunks)
+function openImageInViewer(src: string) {
+  const api = (window as any).electronAPI
+  console.log('[image-click] electronAPI:', api)
+  console.log('[image-click] openImage fn:', api?.openImage)
+  if (api?.openImage) {
+    api.openImage(src)
+    return
+  }
+  // fallback: blob URL로 새 탭에서 열기
+  const byteStr = atob(src.replace(/^data:image\/\w+;base64,/, ''))
+  const arr = new Uint8Array(byteStr.length)
+  for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i)
+  const blob = new Blob([arr], { type: 'image/png' })
+  window.open(URL.createObjectURL(blob), '_blank')
+}
+
+function attachImageHandlers() {
+  if (!containerRef.value || (containerRef.value as any)._imgHandlerBound) return
+  ;(containerRef.value as any)._imgHandlerBound = true
+
+  containerRef.value.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement
+    const img = target.closest('img') as HTMLImageElement | null
+    if (!img) return
+    const src = img.getAttribute('src') ?? ''
+    if (!src.startsWith('data:')) return
+    console.log('[image-click] data: image clicked, src length:', src.length)
+    openImageInViewer(src)
+  })
+}
+
+// Re-attach copy buttons whenever html updates; image handler is set once via delegation
 watch(html, () => nextTick(attachCopyButtons))
-onMounted(() => nextTick(attachCopyButtons))
+onMounted(() => nextTick(() => { attachCopyButtons(); attachImageHandlers() }))
 </script>
 
 <style scoped>
@@ -194,4 +225,16 @@ onMounted(() => nextTick(attachCopyButtons))
 /* ── Strong / Em ──────────────────────────────────────────────────────── */
 .markdown-body :deep(strong) { color: #f9fafb; font-weight: 700; }
 .markdown-body :deep(em) { color: #d1d5db; }
+
+/* ── Screenshot image ─────────────────────────────────────────────────── */
+.markdown-body :deep(img[src^="data:"]) {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid #2d3148;
+  cursor: zoom-in;
+  transition: opacity 0.15s;
+}
+.markdown-body :deep(img[src^="data:"]:hover) {
+  opacity: 0.85;
+}
 </style>
