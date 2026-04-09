@@ -1,6 +1,7 @@
 import importlib
 import inspect
-import os
+import logging
+import traceback
 from pathlib import Path
 from .skill_base import SkillBase
 
@@ -17,19 +18,32 @@ class SkillRegistry:
             module_name = f"skills.{py_file.stem}"
             try:
                 module = importlib.import_module(module_name)
-                for name, obj in inspect.getmembers(module, inspect.isclass):
-                    if issubclass(obj, SkillBase) and obj is not SkillBase:
-                        instance = obj()
-                        self._skills[instance.name] = instance
-                        print(f"[Skills] Loaded: {instance.name}")
-            except Exception as e:
-                print(f"[Skills] Failed to load {py_file.name}: {e}")
+                for attr_name, obj in inspect.getmembers(module, inspect.isclass):
+                    if obj is SkillBase:
+                        continue
+                    if not issubclass(obj, SkillBase):
+                        continue
+                    # Skip classes not defined in this module (imported ones)
+                    if obj.__module__ != module.__name__:
+                        continue
+                    instance = obj()
+                    self._skills[instance.name] = instance
+                    logging.info(f"[Skills] Loaded: {instance.name} ({py_file.name})")
+            except Exception:
+                logging.error(
+                    f"[Skills] Failed to load {py_file.name}:\n{traceback.format_exc()}"
+                )
 
     def register(self, skill: SkillBase):
         self._skills[skill.name] = skill
 
     def get(self, name: str) -> SkillBase | None:
-        return self._skills.get(name)
+        skill = self._skills.get(name)
+        if skill is None:
+            logging.warning(
+                f"[Skills] '{name}' not found. Registered: {list(self._skills.keys())}"
+            )
+        return skill
 
     def list_all(self) -> list[dict]:
         return [

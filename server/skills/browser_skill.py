@@ -1,23 +1,29 @@
 import asyncio
+import logging
 import os
 from pathlib import Path
 from .skill_base import SkillBase
 
-# 프로젝트 내 로컬 Chromium 경로 (server/browsers/chrome-win64/chrome.exe)
+# Look for Chromium in these locations (in priority order)
 _BROWSERS_DIR = Path(__file__).parent.parent / "browsers"
-_LOCAL_CHROME = _BROWSERS_DIR / "chrome-win64" / "chrome.exe"
+_CHROME_CANDIDATES = [
+    _BROWSERS_DIR / "chrome-win64" / "chrome.exe",  # extracted with folder
+    _BROWSERS_DIR / "chrome.exe",                    # extracted flat
+    _BROWSERS_DIR / "chrome-win64" / "chrome",       # Linux/Mac
+    _BROWSERS_DIR / "chrome",
+]
 
 
-def _get_chromium_kwargs() -> dict:
-    """로컬 chrome.exe가 있으면 사용하고, 없으면 Playwright 기본 설치 경로를 사용."""
-    kwargs = {"headless": False, "slow_mo": 500}
-    # 환경변수 우선
-    env_path = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
-    if env_path and Path(env_path).exists():
-        kwargs["executable_path"] = env_path
-    elif _LOCAL_CHROME.exists():
-        kwargs["executable_path"] = str(_LOCAL_CHROME)
-    return kwargs
+def _find_chrome() -> str | None:
+    """Return path to local chrome.exe if found, else None."""
+    # Environment variable takes highest priority
+    env = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+    if env and Path(env).exists():
+        return env
+    for candidate in _CHROME_CANDIDATES:
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 class AnalyzeEquipmentSkill(SkillBase):
@@ -35,19 +41,34 @@ class AnalyzeEquipmentSkill(SkillBase):
     }
 
     async def run(self, equipment_id: str, **kwargs) -> dict:
+        logging.info(f"[browser_skill] run() called with equipment_id={equipment_id!r}")
+
+        chrome_path = _find_chrome()
+        logging.info(f"[browser_skill] Chrome path: {chrome_path}")
+
+        launch_kwargs: dict = {"headless": False, "slow_mo": 500}
+        if chrome_path:
+            launch_kwargs["executable_path"] = chrome_path
+        else:
+            logging.warning(
+                "[browser_skill] No local chrome found — using Playwright default. "
+                f"Searched: {[str(c) for c in _CHROME_CANDIDATES]}"
+            )
+
         try:
             from playwright.async_api import async_playwright
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(**_get_chromium_kwargs())
+                logging.info("[browser_skill] Playwright started, launching browser...")
+                browser = await p.chromium.launch(**launch_kwargs)
                 page = await browser.new_page()
 
-                await page.goto("https://nxswe.samsungds.net", timeout=30000)
+                target_url = "https://nxswe.samsungds.net"
+                logging.info(f"[browser_skill] Navigating to {target_url}")
+                await page.goto(target_url, timeout=30000)
                 await asyncio.sleep(2)
 
-                screenshot_bytes = await page.screenshot()
-
-                extracted_data = {}
+                extracted_data: dict = {}
                 try:
                     rows = await page.query_selector_all("tr")
                     for row in rows:
@@ -55,10 +76,11 @@ class AnalyzeEquipmentSkill(SkillBase):
                         if equipment_id in text:
                             extracted_data["row_text"] = text.strip()
                             break
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.warning(f"[browser_skill] Data extraction error: {e}")
 
                 await browser.close()
+                logging.info(f"[browser_skill] Done. data={extracted_data}")
 
                 return {
                     "status": "success",
@@ -68,8 +90,9 @@ class AnalyzeEquipmentSkill(SkillBase):
                 }
 
         except Exception as e:
+            logging.error(f"[browser_skill] run() failed: {e}", exc_info=True)
             return {
                 "status": "error",
                 "equipment_id": equipment_id,
-                "message": f"설비 분석 중 오류가 발생했습니다: {str(e)}",
+                "message": f"설비 분석 오류: {e}",
             }

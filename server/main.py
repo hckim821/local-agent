@@ -140,4 +140,5 @@ async def run_skill(skill_name: str, body: SkillRunRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # reload=False: reload=True spawns a subprocess which disconnects stdout
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
