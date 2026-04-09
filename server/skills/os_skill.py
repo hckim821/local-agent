@@ -44,23 +44,42 @@ def _enum_visible_window_titles() -> list[str]:
 
 def _window_appeared(keyword: str, before: list[str]) -> str | None:
     """
-    Return the title of a new window that contains `keyword` (case-insensitive),
-    or None if no such window appeared since `before` was captured.
+    Return the title of a window that contains `keyword` (case-insensitive),
+    prioritising windows that are new since `before` was captured.
     """
     keyword_lower = keyword.lower()
     after = _enum_visible_window_titles()
     new_titles = set(after) - set(before)
 
-    # First check newly opened windows
     for title in new_titles:
         if keyword_lower in title.lower():
             return title
 
-    # Fallback: any visible window containing the keyword
+    # Fallback: any existing visible window matching keyword
     for title in after:
         if keyword_lower in title.lower():
             return title
 
+    return None
+
+
+async def _poll_for_window(
+    keyword: str,
+    before: list[str],
+    timeout: float = 10.0,
+    interval: float = 0.5,
+) -> str | None:
+    """
+    Poll every `interval` seconds until a window matching `keyword` appears
+    or `timeout` seconds have elapsed.
+    """
+    elapsed = 0.0
+    while elapsed < timeout:
+        result = _window_appeared(keyword, before)
+        if result:
+            return result
+        await asyncio.sleep(interval)
+        elapsed += interval
     return None
 
 
@@ -102,10 +121,10 @@ class RunApplicationSkill(SkillBase):
 
             # Launch the top search result
             pyautogui.press("enter")
-            await asyncio.sleep(2.5)
 
-            # Verify a matching window actually appeared
-            matched_title = _window_appeared(app_name, windows_before)
+            # Poll until the app window appears (up to 10 seconds)
+            logging.info(f"[os_skill] Waiting for window: {app_name!r}")
+            matched_title = await _poll_for_window(app_name, windows_before)
             if matched_title:
                 logging.info(f"[os_skill] Window found: {matched_title!r}")
                 return {
