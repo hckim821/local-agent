@@ -9,24 +9,20 @@ _LAUNCH_TIMEOUT = 15.0   # seconds to wait for EES UI window
 _BUTTON_TIMEOUT = 10.0   # seconds to wait for button to become clickable
 
 
-async def _find_and_click_button(window_keyword: str, button_text: str) -> str | None:
+def _try_find_and_click_button(window_keyword: str, button_text: str) -> str | None:
     """
-    Windows UI Automation으로 버튼을 찾아 클릭합니다.
-    성공 시 버튼 텍스트 반환, 실패 시 None 반환.
+    Windows UI Automation으로 버튼을 한 번 탐색하여 클릭합니다.
+    성공 시 버튼 텍스트 반환, 실패(미발견 포함) 시 None 반환.
     """
     try:
-        # pywinauto UIA backend — works with Win32, WPF, WinForms, etc.
         from pywinauto import Desktop
-        from pywinauto.findwindows import ElementNotFoundError
 
-        # Find the target window (partial title match)
         desktop = Desktop(backend="uia")
         target_win = None
 
         for win in desktop.windows():
             try:
-                title = win.window_text()
-                if window_keyword.lower() in title.lower():
+                if window_keyword.lower() in win.window_text().lower():
                     target_win = win
                     break
             except Exception:
@@ -35,14 +31,11 @@ async def _find_and_click_button(window_keyword: str, button_text: str) -> str |
         if target_win is None:
             return None
 
-        # Bring window to foreground
         try:
             target_win.set_focus()
-            await asyncio.sleep(0.5)
         except Exception:
             pass
 
-        # Search for button recursively (depth-first)
         def _find_button(element, keyword: str, depth: int = 0):
             if depth > 8:
                 return None
@@ -64,19 +57,41 @@ async def _find_and_click_button(window_keyword: str, button_text: str) -> str |
 
         button = _find_button(target_win, button_text)
         if button is None:
-            logging.warning(
-                f"[ees_skill] Button {button_text!r} not found in {window_keyword!r}"
-            )
             return None
 
-        button_label = button.window_text()
-        logging.info(f"[ees_skill] Clicking button: {button_label!r}")
+        label = button.window_text()
         button.click_input()
-        return button_label
+        logging.info(f"[ees_skill] Clicked: {label!r}")
+        return label
 
     except Exception as e:
-        logging.error(f"[ees_skill] UI Automation error: {e}", exc_info=True)
+        logging.debug(f"[ees_skill] _try_find_and_click_button error: {e}")
         return None
+
+
+async def _poll_for_button(
+    window_keyword: str,
+    button_text: str,
+    timeout: float = 10.0,
+    interval: float = 0.5,
+) -> str | None:
+    """
+    버튼이 나타날 때까지 interval마다 재시도합니다.
+    앱이 느리게 로딩되어 버튼이 늦게 렌더링되는 경우에도 안정적으로 동작합니다.
+    """
+    elapsed = 0.0
+    attempt = 0
+    while elapsed < timeout:
+        attempt += 1
+        logging.info(
+            f"[ees_skill] Button poll #{attempt} ({elapsed:.1f}s / {timeout}s)"
+        )
+        result = _try_find_and_click_button(window_keyword, button_text)
+        if result is not None:
+            return result
+        await asyncio.sleep(interval)
+        elapsed += interval
+    return None
 
 
 class RunEESSkill(SkillBase):
@@ -124,12 +139,11 @@ class RunEESSkill(SkillBase):
 
         logging.info(f"[ees_skill] EES UI opened: {ees_window!r}")
 
-        # ── Step 2: PnP Desktop 실행 버튼 클릭 ────────────────────────────────
-        # Give the app a moment to fully render its UI
-        await asyncio.sleep(2.0)
-
-        logging.info(f"[ees_skill] Looking for button: {_PNP_BUTTON!r}")
-        clicked = await _find_and_click_button(_EES_APP_NAME, _PNP_BUTTON)
+        # ── Step 2: PnP Desktop 실행 버튼 클릭 (폴링) ────────────────────────
+        logging.info(f"[ees_skill] Polling for button: {_PNP_BUTTON!r}")
+        clicked = await _poll_for_button(
+            _EES_APP_NAME, _PNP_BUTTON, timeout=_BUTTON_TIMEOUT, interval=0.5
+        )
 
         if clicked:
             return {
