@@ -3,46 +3,46 @@ setlocal enabledelayedexpansion
 
 echo ============================================================
 echo  Local AI Assistant – Dev Mode
+echo  PowerShell 버전 권장: start.ps1
 echo ============================================================
 
-REM ── Check deps ────────────────────────────────────────────────
 if not exist "server\main.py" (
-    echo ERROR: Run this script from the repo root.
+    echo [ERROR] 프로젝트 루트에서 실행하세요.
     pause & exit /b 1
 )
 
-REM ── FastAPI server ────────────────────────────────────────────
-echo [1/4] Starting FastAPI server...
-start "FastAPI" /B python server\main.py
-echo       FastAPI started on http://localhost:8000
+REM ── FastAPI ────────────────────────────────────────────────────
+echo [1/4] FastAPI 서버 시작...
+start "FastAPI" cmd /k "python server\main.py"
+echo       http://localhost:8000
 
-REM ── Frontend dev server ───────────────────────────────────────
-echo [2/4] Starting Vue dev server...
+REM ── Vue dev server ─────────────────────────────────────────────
+echo [2/4] Vue 개발 서버 시작...
 if not exist "apps\frontend\node_modules" (
-    echo       Installing frontend dependencies...
+    echo       의존성 설치 중...
     cd apps\frontend && npm install && cd ..\..
 )
-start "Vite" /B cmd /c "cd apps\frontend && npm run dev"
-echo       Vite started on http://localhost:5173
+start "Vite" cmd /k "cd apps\frontend && npm run dev"
+echo       http://localhost:5173
 
-REM ── Install Electron deps if needed ──────────────────────────
+REM ── Electron deps ──────────────────────────────────────────────
 if not exist "apps\desktop\node_modules" (
-    echo [3/4] Installing Electron dependencies...
+    echo [3/4] Electron 의존성 설치 중...
     cd apps\desktop && npm install && cd ..\..
 ) else (
-    echo [3/4] Electron dependencies OK
+    echo [3/4] Electron 의존성 OK
 )
 
-REM ── Wait for servers to be ready ─────────────────────────────
-echo [4/4] Waiting 5 seconds for servers to initialise...
+REM ── 대기 ───────────────────────────────────────────────────────
+echo [4/4] 서버 초기화 대기 (5초)...
 timeout /t 5 /nobreak >nul
 
-REM ── Electron ─────────────────────────────────────────────────
-echo       Launching Electron...
+REM ── Electron ───────────────────────────────────────────────────
+echo       Electron 시작...
 cd apps\desktop
 npx electron . --dev
 cd ..\..
 
 echo.
-echo All processes stopped.
+echo 종료되었습니다.
 endlocal
