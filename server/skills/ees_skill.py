@@ -6,118 +6,174 @@ from .skill_base import SkillBase
 from .os_skill import _paste_text, _enum_visible_window_titles, _poll_for_window
 
 _EES_APP_NAME = "EES UI"
-_PNP_BUTTON = "PnP Desktop 실행"
+_PNP_BUTTON   = "PnP Desktop 실행"
 _LAUNCH_TIMEOUT = 15.0
-_BUTTON_TIMEOUT = 10.0
+_BUTTON_TIMEOUT = 15.0
+_BUTTON_INTERVAL = 1.0   # 탐색 1회에 수초 걸릴 수 있으므로 여유 있게 설정
 
+
+# ── ctypes helpers ────────────────────────────────────────────────────────────
 
 def _find_hwnd_by_keyword(keyword: str) -> int | None:
-    """
-    ctypes EnumWindows로 keyword를 포함하는 가시 창의 HWND를 반환합니다.
-    pywinauto window_text()와 달리 GetWindowTextW는 대부분의 앱에서 정상 동작합니다.
-    """
+    """GetWindowTextW로 keyword 포함 창의 HWND 반환 (pywinauto window_text() 우회)."""
     found: list[int] = []
-    keyword_lower = keyword.lower()
-
-    EnumProc = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    kw = keyword.lower()
+    EnumProc = ctypes.WINFUNCTYPE(
+        ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
+    )
 
     def _cb(hwnd: int, _: int) -> bool:
         if not ctypes.windll.user32.IsWindowVisible(hwnd):
             return True
-        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-        if length == 0:
+        n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
             return True
-        buf = ctypes.create_unicode_buffer(length + 1)
-        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
-        if keyword_lower in buf.value.lower():
+        buf = ctypes.create_unicode_buffer(n + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
+        if kw in buf.value.lower():
             found.append(hwnd)
-            return False  # 첫 번째 매칭에서 중단
+            return False
         return True
 
     ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
     return found[0] if found else None
 
 
-def _try_find_and_click_button(window_keyword: str, button_text: str) -> str | None:
+def _get_window_title(hwnd: int) -> str:
+    n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(n + 1)
+    ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def _find_child_hwnd_by_text(parent_hwnd: int, keyword: str) -> int | None:
     """
-    ctypes로 HWND를 찾은 뒤 pywinauto UIA 백엔드로 연결하여 버튼을 클릭합니다.
-    window_text()가 None을 반환하는 앱도 핸들 기반 연결로 우회합니다.
+    EnumChildWindows(재귀 포함)로 keyword를 포함하는 자식 HWND 반환.
+    Win32 네이티브 버튼에 즉시 동작 (수ms).
+    """
+    found: list[int] = []
+    kw = keyword.lower()
+    EnumProc = ctypes.WINFUNCTYPE(
+        ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
+    )
+
+    def _cb(hwnd: int, _: int) -> bool:
+        n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
+        if kw in buf.value.lower():
+            found.append(hwnd)
+            return False
+        return True
+
+    ctypes.windll.user32.EnumChildWindows(parent_hwnd, EnumProc(_cb), 0)
+    return found[0] if found else None
+
+
+def _click_hwnd_center(hwnd: int) -> bool:
+    """HWND의 화면 중심 좌표를 구해 pyautogui로 클릭합니다."""
+    try:
+        import pyautogui
+        rect = ctypes.wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        cx = (rect.left + rect.right) // 2
+        cy = (rect.top + rect.bottom) // 2
+        pyautogui.click(cx, cy)
+        logging.info(f"[ees_skill] Clicked via ctypes HWND at ({cx}, {cy})")
+        return True
+    except Exception as e:
+        logging.debug(f"[ees_skill] _click_hwnd_center failed: {e}")
+        return False
+
+
+# ── pywinauto fallback (WPF / 커스텀 컨트롤) ──────────────────────────────────
+
+def _uia_rect_click(hwnd: int, button_text: str) -> str | None:
+    """
+    pywinauto UIA 백엔드의 descendants() 로 전체 요소를 한 번에 가져와서
+    rectangle() 좌표 기반 물리 클릭합니다.
+    C# WPF 앱은 컨트롤별 HWND가 없으므로 click_input() 대신 pyautogui.click() 사용.
     """
     try:
-        hwnd = _find_hwnd_by_keyword(window_keyword)
-        if hwnd is None:
-            logging.debug(f"[ees_skill] HWND not found for {window_keyword!r}")
-            return None
-
-        # GetWindowText로 실제 타이틀 확인
-        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(length + 1)
-        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
-        actual_title = buf.value
-        logging.info(f"[ees_skill] Found window HWND={hwnd} title={actual_title!r}")
-
+        import pyautogui
         from pywinauto import Application
 
-        # handle= 로 연결하면 window_text() 의존 없이 동작
         app = Application(backend="uia").connect(handle=hwnd)
-        target_win = app.top_window()
-
+        win = app.top_window()
         try:
-            target_win.set_focus()
+            win.set_focus()
         except Exception:
             pass
 
-        def _find_button(element, keyword: str, depth: int = 0):
-            if depth > 8:
-                return None
+        kw = button_text.lower()
+
+        # descendants()는 내부적으로 IUIAutomation::FindAll 단일 호출
+        for elem in win.descendants():
             try:
-                # element_info.name 이 window_text()보다 UIA에서 더 안정적
-                name = element.element_info.name or element.window_text() or ""
-                ctrl_type = element.element_info.control_type
-                if keyword.lower() in name.lower() and ctrl_type in ("Button", "Custom"):
-                    return element
+                name = (elem.element_info.name or "").strip()
+                if kw in name.lower():
+                    rect = elem.rectangle()
+                    cx = (rect.left + rect.right) // 2
+                    cy = (rect.top + rect.bottom) // 2
+                    pyautogui.click(cx, cy)
+                    logging.info(f"[ees_skill] UIA rect-click: {name!r} at ({cx}, {cy})")
+                    return name
             except Exception:
-                pass
-            try:
-                for child in element.children():
-                    result = _find_button(child, keyword, depth + 1)
-                    if result is not None:
-                        return result
-            except Exception:
-                pass
-            return None
+                continue
 
-        button = _find_button(target_win, button_text)
-        if button is None:
-            return None
-
-        label = button.element_info.name or button.window_text()
-        button.click_input()
-        logging.info(f"[ees_skill] Clicked button: {label!r}")
-        return label
-
-    except Exception as e:
-        logging.debug(f"[ees_skill] _try_find_and_click_button error: {e}")
         return None
 
+    except Exception as e:
+        logging.debug(f"[ees_skill] _uia_rect_click error: {e}")
+        return None
+
+
+# ── 통합 탐색·클릭 함수 ───────────────────────────────────────────────────────
+
+def _try_find_and_click_button(window_keyword: str, button_text: str) -> str | None:
+    """
+    1) ctypes EnumChildWindows + pyautogui  — Win32 / WinForms (수ms)
+    2) UIA rectangle() + pyautogui.click()  — C# WPF / 커스텀 컨트롤 (수백ms)
+
+    WPF는 컨트롤별 HWND가 없으므로 1단계가 실패해도
+    2단계에서 UIA 좌표 기반 물리 클릭으로 처리합니다.
+    """
+    hwnd = _find_hwnd_by_keyword(window_keyword)
+    if hwnd is None:
+        logging.debug(f"[ees_skill] Window not found: {window_keyword!r}")
+        return None
+
+    title = _get_window_title(hwnd)
+    logging.info(f"[ees_skill] Window HWND={hwnd} title={title!r}")
+
+    # ── 1단계: Win32 child HWND 탐색 (WinForms 등) ───────────────
+    child_hwnd = _find_child_hwnd_by_text(hwnd, button_text)
+    if child_hwnd is not None:
+        child_title = _get_window_title(child_hwnd)
+        logging.info(f"[ees_skill] Win32 button HWND={child_hwnd} text={child_title!r}")
+        if _click_hwnd_center(child_hwnd):
+            return child_title
+
+    # ── 2단계: UIA 좌표 기반 물리 클릭 (C# WPF 대응) ────────────
+    logging.info("[ees_skill] Trying UIA rectangle-based click (WPF mode)...")
+    return _uia_rect_click(hwnd, button_text)
+
+
+# ── 폴링 ─────────────────────────────────────────────────────────────────────
 
 async def _poll_for_button(
     window_keyword: str,
     button_text: str,
-    timeout: float = 10.0,
-    interval: float = 0.5,
+    timeout: float = _BUTTON_TIMEOUT,
+    interval: float = _BUTTON_INTERVAL,
 ) -> str | None:
-    """
-    버튼이 나타날 때까지 interval마다 재시도합니다.
-    앱이 느리게 로딩되어 버튼이 늦게 렌더링되는 경우에도 안정적으로 동작합니다.
-    """
     elapsed = 0.0
     attempt = 0
     while elapsed < timeout:
         attempt += 1
-        logging.info(
-            f"[ees_skill] Button poll #{attempt} ({elapsed:.1f}s / {timeout}s)"
-        )
+        logging.info(f"[ees_skill] Button poll #{attempt} elapsed={elapsed:.1f}s")
         result = _try_find_and_click_button(window_keyword, button_text)
         if result is not None:
             return result
@@ -126,11 +182,12 @@ async def _poll_for_button(
     return None
 
 
+# ── Skill ─────────────────────────────────────────────────────────────────────
+
 class RunEESSkill(SkillBase):
     name = "run_ees"
     description = (
-        "EES UI 애플리케이션을 실행한 뒤 "
-        "'PnP Desktop 실행' 버튼을 자동으로 클릭합니다."
+        "EES UI 애플리케이션을 실행한 뒤 'PnP Desktop 실행' 버튼을 자동으로 클릭합니다."
     )
     parameters = {
         "type": "object",
@@ -143,7 +200,7 @@ class RunEESSkill(SkillBase):
 
         logging.info("[ees_skill] run_ees started")
 
-        # ── Step 1: EES UI 실행 ────────────────────────────────────────────────
+        # ── Step 1: EES UI 실행 ───────────────────────────────────
         windows_before = _enum_visible_window_titles()
 
         pyautogui.press("win")
@@ -171,25 +228,22 @@ class RunEESSkill(SkillBase):
 
         logging.info(f"[ees_skill] EES UI opened: {ees_window!r}")
 
-        # ── Step 2: PnP Desktop 실행 버튼 클릭 (폴링) ────────────────────────
+        # ── Step 2: 버튼 클릭 (폴링) ─────────────────────────────
         logging.info(f"[ees_skill] Polling for button: {_PNP_BUTTON!r}")
-        clicked = await _poll_for_button(
-            _EES_APP_NAME, _PNP_BUTTON, timeout=_BUTTON_TIMEOUT, interval=0.5
-        )
+        clicked = await _poll_for_button(_EES_APP_NAME, _PNP_BUTTON)
 
         if clicked:
             return {
                 "status": "success",
-                "message": (
-                    f"EES UI를 실행하고 '{clicked}' 버튼을 클릭했습니다."
-                ),
+                "message": f"EES UI를 실행하고 '{clicked}' 버튼을 클릭했습니다.",
             }
-        else:
-            return {
-                "status": "not_found",
-                "step": "button_click",
-                "message": (
-                    f"EES UI는 열렸지만 '{_PNP_BUTTON}' 버튼을 찾지 못했습니다. "
-                    "버튼 이름이 정확한지 확인하거나 x, y 좌표를 desktop_interaction 스킬로 직접 지정해 주세요."
-                ),
-            }
+
+        return {
+            "status": "not_found",
+            "step": "button_click",
+            "message": (
+                f"EES UI는 열렸지만 '{_PNP_BUTTON}' 버튼을 찾지 못했습니다. "
+                "desktop_interaction 스킬로 x, y 좌표를 직접 지정하거나 "
+                "버튼 텍스트(_PNP_BUTTON 상수)가 실제 앱 UI와 동일한지 확인해 주세요."
+            ),
+        }
