@@ -1,35 +1,66 @@
 import asyncio
+import ctypes
+import ctypes.wintypes
 import logging
 from .skill_base import SkillBase
 from .os_skill import _paste_text, _enum_visible_window_titles, _poll_for_window
 
 _EES_APP_NAME = "EES UI"
 _PNP_BUTTON = "PnP Desktop 실행"
-_LAUNCH_TIMEOUT = 15.0   # seconds to wait for EES UI window
-_BUTTON_TIMEOUT = 10.0   # seconds to wait for button to become clickable
+_LAUNCH_TIMEOUT = 15.0
+_BUTTON_TIMEOUT = 10.0
+
+
+def _find_hwnd_by_keyword(keyword: str) -> int | None:
+    """
+    ctypes EnumWindows로 keyword를 포함하는 가시 창의 HWND를 반환합니다.
+    pywinauto window_text()와 달리 GetWindowTextW는 대부분의 앱에서 정상 동작합니다.
+    """
+    found: list[int] = []
+    keyword_lower = keyword.lower()
+
+    EnumProc = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+
+    def _cb(hwnd: int, _: int) -> bool:
+        if not ctypes.windll.user32.IsWindowVisible(hwnd):
+            return True
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+        if keyword_lower in buf.value.lower():
+            found.append(hwnd)
+            return False  # 첫 번째 매칭에서 중단
+        return True
+
+    ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
+    return found[0] if found else None
 
 
 def _try_find_and_click_button(window_keyword: str, button_text: str) -> str | None:
     """
-    Windows UI Automation으로 버튼을 한 번 탐색하여 클릭합니다.
-    성공 시 버튼 텍스트 반환, 실패(미발견 포함) 시 None 반환.
+    ctypes로 HWND를 찾은 뒤 pywinauto UIA 백엔드로 연결하여 버튼을 클릭합니다.
+    window_text()가 None을 반환하는 앱도 핸들 기반 연결로 우회합니다.
     """
     try:
-        from pywinauto import Desktop
-
-        desktop = Desktop(backend="uia")
-        target_win = None
-
-        for win in desktop.windows():
-            try:
-                if window_keyword.lower() in win.window_text().lower():
-                    target_win = win
-                    break
-            except Exception:
-                continue
-
-        if target_win is None:
+        hwnd = _find_hwnd_by_keyword(window_keyword)
+        if hwnd is None:
+            logging.debug(f"[ees_skill] HWND not found for {window_keyword!r}")
             return None
+
+        # GetWindowText로 실제 타이틀 확인
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+        actual_title = buf.value
+        logging.info(f"[ees_skill] Found window HWND={hwnd} title={actual_title!r}")
+
+        from pywinauto import Application
+
+        # handle= 로 연결하면 window_text() 의존 없이 동작
+        app = Application(backend="uia").connect(handle=hwnd)
+        target_win = app.top_window()
 
         try:
             target_win.set_focus()
@@ -40,9 +71,10 @@ def _try_find_and_click_button(window_keyword: str, button_text: str) -> str | N
             if depth > 8:
                 return None
             try:
-                text = element.window_text()
+                # element_info.name 이 window_text()보다 UIA에서 더 안정적
+                name = element.element_info.name or element.window_text() or ""
                 ctrl_type = element.element_info.control_type
-                if keyword.lower() in text.lower() and ctrl_type in ("Button", "Custom"):
+                if keyword.lower() in name.lower() and ctrl_type in ("Button", "Custom"):
                     return element
             except Exception:
                 pass
@@ -59,9 +91,9 @@ def _try_find_and_click_button(window_keyword: str, button_text: str) -> str | N
         if button is None:
             return None
 
-        label = button.window_text()
+        label = button.element_info.name or button.window_text()
         button.click_input()
-        logging.info(f"[ees_skill] Clicked: {label!r}")
+        logging.info(f"[ees_skill] Clicked button: {label!r}")
         return label
 
     except Exception as e:
