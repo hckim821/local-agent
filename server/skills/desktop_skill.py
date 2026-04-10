@@ -91,61 +91,58 @@ def _focus_window(keyword: str) -> str | None:
 
 def _capture() -> "Image.Image":
     """
-    전체 화면을 캡처한 뒤, 포커스 창 영역만 직접 crop합니다.
-    스케일 보정:
-      full_img.size  = 물리 해상도 (예: 2880x1620)
-      pyautogui.size = 논리 해상도 (예: 1920x1080)
-      scale = 물리/논리 (예: 1.5)
-      crop은 논리 좌표 * scale 로 이미지 픽셀 좌표로 변환해서 수행.
+    포커스 창 영역을 ImageGrab.grab(bbox=...)으로 캡처합니다.
+    bbox는 가상 화면 좌표 → 어느 모니터든 캡처 가능 (듀얼 모니터 대응).
+    DPI 스케일은 bbox 크기 vs 이미지 크기로 자동 계산.
     """
     global _last_offset, _last_scale, _focused_rect, _focused_hwnd
-    import pyautogui
+    from PIL import ImageGrab
 
-    # 1) 전체 화면 캡처
-    full = pyautogui.screenshot()
-    gui_w, gui_h = pyautogui.size()
-    img_w, img_h = full.size
-    scale_x = img_w / gui_w
-    scale_y = img_h / gui_h
+    offset_x, offset_y = 0, 0
+    bbox = None  # (left, top, right, bottom) 가상 화면 좌표
 
-    logging.info(
-        f"[desktop] full capture: img={full.size} gui=({gui_w},{gui_h}) "
-        f"scale=({scale_x:.3f},{scale_y:.3f})"
-    )
-
-    # 2) 포커스 창 영역으로 crop
-    offset_x, offset_y = 0, 0  # pyautogui 좌표 공간
     if _focused_hwnd is not None:
         rect = ctypes.wintypes.RECT()
         if ctypes.windll.user32.GetWindowRect(_focused_hwnd, ctypes.byref(rect)):
             _focused_rect = (rect.left, rect.top, rect.right, rect.bottom)
-            left, top, right, bottom = _focused_rect
-            offset_x, offset_y = left, top
-            # 논리 좌표 → 이미지 픽셀 좌표로 변환해서 crop
-            crop_box = (
-                int(left * scale_x), int(top * scale_y),
-                int(right * scale_x), int(bottom * scale_y),
-            )
-            full = full.crop(crop_box)
-            logging.info(
-                f"[desktop] window rect(gui): ({left},{top},{right},{bottom}) "
-                f"→ crop(px): {crop_box} → cropped: {full.size}"
-            )
+            bbox = _focused_rect
+            offset_x, offset_y = rect.left, rect.top
+
+    if bbox:
+        img = ImageGrab.grab(bbox=bbox)
+        bbox_w = bbox[2] - bbox[0]
+        bbox_h = bbox[3] - bbox[1]
+    else:
+        img = ImageGrab.grab(all_screens=True)
+        # 가상 화면 원점 (보조 모니터가 왼쪽이면 음수)
+        offset_x = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        offset_y = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        bbox_w = ctypes.windll.user32.GetSystemMetrics(78)    # SM_CXVIRTUALSCREEN
+        bbox_h = ctypes.windll.user32.GetSystemMetrics(79)    # SM_CYVIRTUALSCREEN
+
+    img_w, img_h = img.size
+    scale_x = img_w / bbox_w if bbox_w else 1.0
+    scale_y = img_h / bbox_h if bbox_h else 1.0
 
     _last_offset = (offset_x, offset_y)
     _last_scale = (scale_x, scale_y)
-    return full
+
+    logging.info(
+        f"[desktop] captured: img={img.size} bbox_area=({bbox_w}x{bbox_h}) "
+        f"offset=({offset_x},{offset_y}) scale=({scale_x:.3f},{scale_y:.3f})"
+    )
+    return img
 
 
 def _img_to_screen(img_x: int, img_y: int) -> tuple[int, int]:
     """
-    이미지 내 좌표 → pyautogui 화면 절대 좌표.
-    이미지 픽셀은 물리 해상도이므로 scale로 나눠서 논리 좌표로 변환 후 offset 더함.
+    이미지 내 좌표 → 가상 화면 절대 좌표 (SetCursorPos에 사용).
+    이미지 픽셀이 DPI로 스케일되어 있으면 나눠서 보정.
     """
     sx, sy = _last_scale
-    gui_x = int(img_x / sx) + _last_offset[0]
-    gui_y = int(img_y / sy) + _last_offset[1]
-    return (gui_x, gui_y)
+    screen_x = int(img_x / sx) + _last_offset[0]
+    screen_y = int(img_y / sy) + _last_offset[1]
+    return (screen_x, screen_y)
 
 
 # ── 스킬 1: 창 포커스 ────────────────────────────────────────────────────────
@@ -250,19 +247,22 @@ class DesktopClickXYSkill(SkillBase):
 
         logging.info(f"[desktop] click_xy: img=({x},{y}) double={double_click}")
         try:
-            # 이미지 좌표 → 화면 절대 좌표
+            # 이미지 좌표 → 가상 화면 절대 좌표
             screen_x, screen_y = _img_to_screen(x, y)
             logging.info(
-                f"[desktop] img({x},{y}) + offset{_last_offset} → screen({screen_x},{screen_y})"
+                f"[desktop] img({x},{y}) / scale{_last_scale} + offset{_last_offset} "
+                f"→ screen({screen_x},{screen_y})"
             )
 
-            # 클릭
+            # SetCursorPos(가상 화면 좌표, 듀얼 모니터 대응) + click(현재 위치)
             loop = asyncio.get_event_loop()
             def do_click():
+                ctypes.windll.user32.SetCursorPos(screen_x, screen_y)
+                time.sleep(0.05)
                 if double_click:
-                    pyautogui.doubleClick(screen_x, screen_y)
+                    pyautogui.doubleClick()
                 else:
-                    pyautogui.click(screen_x, screen_y)
+                    pyautogui.click()
                 time.sleep(0.1)
                 pos = pyautogui.position()
                 logging.info(f"[desktop] cursor after click: {pos}")
@@ -280,7 +280,7 @@ class DesktopClickXYSkill(SkillBase):
                 "status": "success",
                 "message": (
                     f"이미지({x},{y}) → 화면({screen_x},{screen_y}) {action} 완료. "
-                    f"커서 위치: ({cursor[0]},{cursor[1]})"
+                    f"커서: ({cursor[0]},{cursor[1]})"
                 ),
                 "image_base64": after_b64,
                 "width": after_img.size[0],
