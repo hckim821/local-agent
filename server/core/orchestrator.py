@@ -117,7 +117,7 @@ class Orchestrator:
                 # 채팅창에 이미지 표시
                 labels = ["클릭 전", "클릭 후"] if len(images) >= 2 else ["스크린샷"] * len(images)
                 for label, img_b64 in zip(labels, images):
-                    yield f"\n**[{label}]**\n![{label}](data:image/png;base64,{img_b64})\n"
+                    yield f"\n**[{label}]**\n![{label}](data:image/jpeg;base64,{img_b64})\n"
 
                 logging.info(f"[Skill] Result: {tool_result}")
 
@@ -129,7 +129,7 @@ class Orchestrator:
                     for img_b64 in images:
                         content_parts.append({
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
                         })
                     self._context.append({
                         "role": "tool",
@@ -189,7 +189,7 @@ class Orchestrator:
                 for img_b64 in images:
                     content_parts.append({
                         "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                        "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
                     })
                 self._context.append({
                     "role": "tool",
