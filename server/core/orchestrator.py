@@ -1,7 +1,7 @@
 import json
 import logging
 from typing import AsyncGenerator
-from .llm_connector import LLMConnector
+from .llm_connector import LLMConnector, _strip_thought_blocks
 
 
 class Orchestrator:
@@ -85,8 +85,10 @@ class Orchestrator:
                 elif event["type"] == "tool_calls":
                     tool_calls = event["value"]
 
+            # context에 thought 잔해가 쌓이면 모델이 이를 보고 또 thinking → 무한루프
+            clean_content = _strip_thought_blocks(accumulated_content)
             self._context.append(
-                self._build_assistant_msg(accumulated_content, tool_calls)
+                self._build_assistant_msg(clean_content, tool_calls)
             )
 
             if not tool_calls:

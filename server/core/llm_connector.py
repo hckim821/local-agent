@@ -29,16 +29,20 @@ def _longest_open_suffix(text: str) -> int:
 
 
 def _strip_thought_blocks(text: str) -> str:
-    """blocking_chat용: 완성된 텍스트에서 thought 블록을 일괄 제거."""
+    """완성된 텍스트에서 thought 블록·태그·잔해를 일괄 제거."""
     # <think>...</think>
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # 닫히지 않은 <think>...
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
     # <|channel>thought ... <|channel>answer (또는 끝)
     text = re.sub(
-        r"<\|channel\|?>thought\b.*?(?=<\|channel\|?>\w|$)",
+        r"<\|channel\|?>thought\b.*?(?=<\|channel\|?>[^t]|$)",
         "", text, flags=re.DOTALL,
     )
-    # 남은 <|channel>answer 등 마커 제거
+    # 남은 <|channel>XXX 마커 제거
     text = _CHANNEL_RE.sub("", text)
+    # 단독 </think>, </thought> 잔해 제거
+    text = re.sub(r"</(?:think|thought)>", "", text)
     return text.strip()
 
 
@@ -70,7 +74,7 @@ class LLMConnector:
             "model": model,
             "messages": messages,
             "stream": False,
-            "chat_template_kwargs": {"thinking": False},
+            "chat_template_kwargs": {"thinking": False, "enable_thinking": False},
         }
         if tools:
             payload["tools"] = tools
@@ -115,7 +119,7 @@ class LLMConnector:
             "model": model,
             "messages": messages,
             "stream": True,
-            "chat_template_kwargs": {"thinking": False},
+            "chat_template_kwargs": {"thinking": False, "enable_thinking": False},
         }
         if tools:
             payload["tools"] = tools
