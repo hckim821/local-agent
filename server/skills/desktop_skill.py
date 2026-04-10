@@ -297,9 +297,10 @@ class DesktopScreenshotSkill(SkillBase):
             if target:
                 message = (
                     f"스크린샷 ({w}x{h}), 창: {window}.\n"
-                    f"이미지에서 '{target}' 요소를 찾아 중앙 픽셀 좌표를 파악하세요.\n"
-                    f"좌표 기준: 왼쪽 상단 (0,0), 오른쪽 하단 ({w},{h}).\n"
-                    f"찾았으면 desktop_click_xy(x, y)로 해당 좌표를 클릭하세요.\n"
+                    f"이미지 상단과 좌측에 빨간색 픽셀 좌표 눈금이 표시되어 있습니다.\n"
+                    f"'{target}' 요소를 찾고, 해당 요소 중앙 위치의 눈금 숫자를 읽어 좌표를 파악하세요.\n"
+                    f"반드시 눈금 숫자를 기준으로 x, y 좌표를 결정하세요.\n"
+                    f"찾았으면 desktop_click_xy(x, y)로 클릭하세요.\n"
                     f"찾지 못했으면 현재 화면 상태를 설명하세요."
                 )
             else:
