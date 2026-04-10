@@ -223,27 +223,47 @@ class DesktopFocusWindowSkill(SkillBase):
 class DesktopScreenshotSkill(SkillBase):
     name = "desktop_screenshot"
     description = (
-        "포커스된 창의 클라이언트 영역(제목줄·테두리 제외) 스크린샷을 찍어 반환합니다. "
-        "이미지의 좌상단이 (0,0)이고 우하단이 (width,height)입니다. "
-        "클릭할 위치를 이미지 내 (x, y) 좌표로 파악한 뒤 "
-        "desktop_click_xy에 전달하세요."
+        "포커스된 창의 스크린샷을 찍어 반환합니다. "
+        "target을 지정하면 해당 UI 요소의 좌표만 파악합니다. "
+        "target이 없으면 전체 화면 상태만 반환합니다."
     )
-    parameters = {"type": "object", "properties": {}, "required": []}
+    parameters = {
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": "찾을 UI 요소의 이름 (예: 'PnP Desktop 실행', '로그인 버튼'). 지정하면 해당 요소의 좌표를 파악합니다.",
+            }
+        },
+        "required": [],
+    }
 
-    async def run(self, **kwargs) -> dict:
-        logging.info("[desktop] screenshot called")
+    async def run(self, target: str | None = None, **kwargs) -> dict:
+        logging.info(f"[desktop] screenshot called, target={target!r}")
         try:
             loop = asyncio.get_event_loop()
             img = await loop.run_in_executor(None, _capture)
             b64 = await loop.run_in_executor(None, _img_to_b64, img)
             w, h = img.size
             window = _focused_title or "전체 화면"
+
+            if target:
+                message = (
+                    f"스크린샷 ({w}x{h}), 창: {window}.\n"
+                    f"이미지에서 '{target}' 요소를 찾아 중앙 픽셀 좌표를 파악하세요.\n"
+                    f"좌표 기준: 왼쪽 상단 (0,0), 오른쪽 하단 ({w},{h}).\n"
+                    f"찾았으면 desktop_click_xy(x, y)로 해당 좌표를 클릭하세요.\n"
+                    f"찾지 못했으면 현재 화면 상태를 설명하세요."
+                )
+            else:
+                message = f"스크린샷 ({w}x{h}), 창: {window}."
+
             return {
                 "status": "success",
                 "width": w,
                 "height": h,
                 "window": window,
-                "message": f"스크린샷 ({w}x{h}). 이미지를 보고 클릭할 좌표를 desktop_click_xy로 전달하세요.",
+                "message": message,
                 "image_base64": b64,
             }
         except Exception as e:

@@ -22,7 +22,6 @@ class Orchestrator:
         image: str | None = None,
     ):
         if image:
-            # Build OpenAI vision multimodal content
             content: list | str = [
                 {"type": "text", "text": user_message or "이 이미지를 분석해줘."},
                 {"type": "image_url", "image_url": {"url": image}},
@@ -74,6 +73,45 @@ class Orchestrator:
         for _ in range(10):
             accumulated_content = ""
             tool_calls = []
+
+            # ── LLM에 보내는 전체 context 디버그 출력 ──────────────────────
+            logging.info("=" * 80)
+            logging.info("[LLM REQUEST] model=%s, tools=%d개", model, len(tools) if tools else 0)
+            for i, msg in enumerate(self._context):
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                # content가 리스트(멀티모달)인 경우 요약
+                if isinstance(content, list):
+                    parts_summary = []
+                    for part in content:
+                        if part.get("type") == "text":
+                            text_val = part.get("text", "")
+                            parts_summary.append(f"text({len(text_val)}자): {text_val[:200]}")
+                        elif part.get("type") == "image_url":
+                            url = part.get("image_url", {}).get("url", "")
+                            parts_summary.append(f"image({len(url)}bytes)")
+                        else:
+                            parts_summary.append(str(part)[:100])
+                    content_display = " | ".join(parts_summary)
+                elif isinstance(content, str):
+                    content_display = content[:300]
+                else:
+                    content_display = str(content)[:300]
+                # tool_calls 요약
+                tc_info = ""
+                if msg.get("tool_calls"):
+                    tc_names = [tc["function"]["name"] for tc in msg["tool_calls"]]
+                    tc_info = f" → tool_calls: {tc_names}"
+                # tool_call_id 표시
+                tcid = f" [tool_call_id={msg['tool_call_id']}]" if "tool_call_id" in msg else ""
+                logging.info(
+                    "[CTX %02d] role=%-10s%s%s | %s",
+                    i, role, tcid, tc_info, content_display,
+                )
+            if tools:
+                tool_names = [t["function"]["name"] for t in tools]
+                logging.info("[TOOLS] %s", tool_names)
+            logging.info("=" * 80)
 
             async for event in connector.stream_tokens(
                 messages=self._context, model=model, tools=tools
