@@ -105,22 +105,36 @@ class Orchestrator:
                     except Exception as e:
                         tool_result = {"error": str(e)}
 
-                # 스크린샷이면 이미지를 채팅창에 표시
-                b64 = tool_result.pop("image_base64", None)
-                if b64:
-                    yield f"\n![스크린샷](data:image/png;base64,{b64})\n"
+                # 이미지 수집: 단일(image_base64) 또는 다중(images_base64) 모두 지원
+                images: list[str] = []
+                single = tool_result.pop("image_base64", None)
+                if single:
+                    images.append(single)
+                multi = tool_result.pop("images_base64", None)
+                if multi:
+                    images.extend(multi)
+
+                # 채팅창에 이미지 표시
+                labels = ["클릭 전", "클릭 후"] if len(images) >= 2 else ["스크린샷"] * len(images)
+                for label, img_b64 in zip(labels, images):
+                    yield f"\n**[{label}]**\n![{label}](data:image/png;base64,{img_b64})\n"
 
                 logging.info(f"[Skill] Result: {tool_result}")
 
-                # 이미지가 있으면 멀티모달 content로 context에 포함 → LLM이 이미지 분석 가능
-                if b64:
+                # 마지막 이미지를 LLM context에 포함 (분석용)
+                if images:
+                    content_parts: list = [
+                        {"type": "text", "text": json.dumps(tool_result, ensure_ascii=False)}
+                    ]
+                    for img_b64 in images:
+                        content_parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                        })
                     self._context.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
-                        "content": [
-                            {"type": "text", "text": json.dumps(tool_result, ensure_ascii=False)},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                        ],
+                        "content": content_parts,
                     })
                 else:
                     self._context.append({
@@ -159,16 +173,28 @@ class Orchestrator:
                 except Exception as e:
                     result = {"error": str(e)}
 
-            # 이미지가 있으면 멀티모달 content로 context에 포함 → LLM이 이미지 분석 가능
-            b64 = result.pop("image_base64", None)
-            if b64:
+            # 이미지 수집: 단일(image_base64) 또는 다중(images_base64) 모두 지원
+            images: list[str] = []
+            single = result.pop("image_base64", None)
+            if single:
+                images.append(single)
+            multi = result.pop("images_base64", None)
+            if multi:
+                images.extend(multi)
+
+            if images:
+                content_parts: list = [
+                    {"type": "text", "text": json.dumps(result, ensure_ascii=False)}
+                ]
+                for img_b64 in images:
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    })
                 self._context.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": [
-                        {"type": "text", "text": json.dumps(result, ensure_ascii=False)},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-                    ],
+                    "content": content_parts,
                 })
             else:
                 self._context.append({

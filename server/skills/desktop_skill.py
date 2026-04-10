@@ -27,12 +27,90 @@ import ctypes
 import ctypes.wintypes
 import io
 import logging
+import time
 
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 from .skill_base import SkillBase
 
-# 마지막 screenshot의 요소 맵: {번호: {"x": int, "y": int, "text": str}}
+
+# ── 클릭 helpers ──────────────────────────────────────────────────────────────
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def _cursor_pos() -> tuple[int, int]:
+    pt = _POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
+def _move_cursor(x: int, y: int) -> tuple[int, int]:
+    """SetCursorPos로 커서 이동 (UIPI 무관, 항상 동작). 실제 이동 좌표 반환."""
+    ctypes.windll.user32.SetCursorPos(x, y)
+    time.sleep(0.05)
+    return _cursor_pos()
+
+
+def _try_uia_invoke(x: int, y: int) -> bool:
+    """
+    UIA InvokePattern으로 클릭합니다.
+    pyautogui(SendInput)가 UIPI로 차단될 때(elevated 앱) 우회 수단.
+    버튼·링크처럼 InvokePattern을 구현한 요소에만 동작합니다.
+    """
+    try:
+        from pywinauto import Desktop  # type: ignore
+        elem = Desktop(backend="uia").from_point(x, y)
+        try:
+            elem.invoke()
+            logging.info(f"[desktop_skill] UIA invoke OK at ({x}, {y})")
+            return True
+        except Exception:
+            pass
+        try:
+            elem.toggle()
+            logging.info(f"[desktop_skill] UIA toggle OK at ({x}, {y})")
+            return True
+        except Exception:
+            pass
+    except Exception as e:
+        logging.debug(f"[desktop_skill] UIA invoke error: {e}")
+    return False
+
+
+def _do_click(x: int, y: int, double: bool = False) -> dict:
+    """
+    1. SetCursorPos로 커서 이동 (항상 동작)
+    2. pyautogui로 현재 커서 위치 클릭 (SendInput; elevated 앱엔 차단될 수 있음)
+    클릭 전후 커서 좌표를 로그에 기록합니다.
+    """
+    import pyautogui  # type: ignore
+
+    before = _cursor_pos()
+    actual = _move_cursor(x, y)
+    cursor_ok = abs(actual[0] - x) <= 2 and abs(actual[1] - y) <= 2
+
+    logging.info(
+        f"[desktop_skill] click target=({x},{y}) "
+        f"before={before} after={actual} cursor_ok={cursor_ok}"
+    )
+
+    # 좌표 없이 호출 → 현재 커서 위치에서 클릭 (SetCursorPos 이동 결과 활용)
+    if double:
+        pyautogui.doubleClick()
+    else:
+        pyautogui.click()
+
+    time.sleep(0.1)
+    after_click = _cursor_pos()
+    logging.info(f"[desktop_skill] cursor after click={after_click}")
+
+    return {"cursor_ok": cursor_ok, "cursor_at": actual}
+
+# 마지막 screenshot 상태 (클릭 미리보기 렌더링에 재사용)
 _element_map: dict[int, dict] = {}
+_last_raw_img: "Image.Image | None" = None   # OCR 전 원본 이미지
+_last_scale: tuple[float, float] = (1.0, 1.0)  # 캡처 시 DPI 스케일
 
 
 # ── DPI 스케일 보정 ───────────────────────────────────────────────────────────
@@ -96,6 +174,61 @@ def _focus_window_by_keyword(keyword: str) -> str | None:
 
 # ── OCR + 오버레이 ────────────────────────────────────────────────────────────
 
+def _render_overlay(
+    raw_img: "Image.Image",
+    element_map: dict,
+    scale: tuple[float, float],
+    highlight: int | None = None,
+) -> str:
+    """
+    저장된 원본 이미지에 번호 마커를 오버레이해 base64 PNG로 반환합니다.
+    highlight: 특별히 강조할 요소 번호 (초록 큰 원으로 표시)
+    """
+    scale_x, scale_y = scale
+    img_rgba = raw_img.convert("RGBA")
+    overlay = Image.new("RGBA", raw_img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 13)
+        font_hl = ImageFont.truetype("arial.ttf", 15)
+    except Exception:
+        font = ImageFont.load_default()
+        font_hl = font
+
+    for i, el in element_map.items():
+        phys_x = int(el["x"] * scale_x)
+        phys_y = int(el["y"] * scale_y)
+
+        if i == highlight:
+            # 강조: 초록색 큰 원 + 테두리
+            r = 16
+            draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r],
+                         fill=(30, 200, 80, 230), outline=(255, 255, 255, 255), width=2)
+            label = str(i)
+            bbox = draw.textbbox((0, 0), label, font=font_hl)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((phys_x - tw / 2, phys_y - th / 2), label,
+                      fill=(255, 255, 255, 255), font=font_hl)
+            # 화살표 텍스트
+            draw.text((phys_x + r + 4, phys_y - 8), "← 클릭",
+                      fill=(30, 200, 80, 230), font=font)
+        else:
+            r = 11
+            draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r],
+                         fill=(255, 80, 0, 180))
+            label = str(i)
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((phys_x - tw / 2, phys_y - th / 2), label,
+                      fill=(255, 255, 255, 255), font=font)
+
+    combined = Image.alpha_composite(img_rgba, overlay).convert("RGB")
+    buf = io.BytesIO()
+    combined.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def _build_annotated_screenshot() -> tuple[str, dict]:
     """
     전체 화면 스크린샷을 찍고 OCR로 텍스트 영역을 감지해 번호 마커를 오버레이합니다.
@@ -103,11 +236,14 @@ def _build_annotated_screenshot() -> tuple[str, dict]:
     pytesseract가 없으면 마커 없이 원본 이미지만 반환합니다.
     반환: (base64 PNG 문자열, element_map)
     """
+    global _last_raw_img, _last_scale
     img = ImageGrab.grab()  # 전체 모니터 캡처
+    _last_raw_img = img.copy()
     scale_x, scale_y = _get_dpi_scale()
     logging.info(f"[desktop_skill] DPI scale: x={scale_x:.3f} y={scale_y:.3f}, "
                  f"captured={img.size}")
 
+    _last_scale = (scale_x, scale_y)
     elements: list[dict] = []
 
     # ── OCR로 텍스트 영역 탐색 ──────────────────────────────────────────────
@@ -125,7 +261,6 @@ def _build_annotated_screenshot() -> tuple[str, dict]:
             conf = int(data["conf"][i])
             w, h = data["width"][i], data["height"][i]
             if text and conf > 60 and w > 8 and h > 8:
-                # 물리 픽셀 중심 좌표 → 논리 좌표로 보정
                 phys_cx = data["left"][i] + w // 2
                 phys_cy = data["top"][i] + h // 2
                 elements.append(
@@ -139,40 +274,13 @@ def _build_annotated_screenshot() -> tuple[str, dict]:
     except Exception as e:
         logging.warning(f"[desktop_skill] OCR unavailable ({e}); returning plain screenshot")
 
-    # ── 번호 마커 오버레이 (이미지 좌표 = 물리 픽셀) ─────────────────────────
-    img_rgba = img.convert("RGBA")
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    element_map: dict[int, dict] = {
+        i: {"x": el["x"], "y": el["y"], "text": el["text"]}
+        for i, el in enumerate(elements, start=1)
+    }
 
-    try:
-        font = ImageFont.truetype("arial.ttf", 13)
-    except Exception:
-        font = ImageFont.load_default()
-
-    element_map: dict[int, dict] = {}
-    for i, el in enumerate(elements, start=1):
-        # 오버레이는 이미지(물리 픽셀) 기준으로 그려야 정확히 맞음
-        phys_x = int(el["x"] * scale_x)
-        phys_y = int(el["y"] * scale_y)
-        r = 11
-        draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r], fill=(255, 80, 0, 200))
-        label = str(i)
-        bbox = draw.textbbox((0, 0), label, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text(
-            (phys_x - tw / 2, phys_y - th / 2),
-            label,
-            fill=(255, 255, 255, 255),
-            font=font,
-        )
-        # element_map에는 논리 좌표 저장 (pyautogui 클릭용)
-        element_map[i] = {"x": el["x"], "y": el["y"], "text": el["text"]}
-
-    combined = Image.alpha_composite(img_rgba, overlay).convert("RGB")
-    buf = io.BytesIO()
-    combined.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
-
+    # 오버레이 렌더링 (_render_overlay 공통 함수 사용)
+    b64 = _render_overlay(img, element_map, (scale_x, scale_y))
     return b64, element_map
 
 
@@ -284,7 +392,7 @@ class DesktopClickElementSkill(SkillBase):
     }
 
     async def run(self, number: int, **kwargs) -> dict:
-        global _element_map
+        global _element_map, _last_raw_img, _last_scale
         logging.info(f"[desktop_skill] desktop_click_element: number={number}")
         try:
             if not _element_map:
@@ -302,21 +410,48 @@ class DesktopClickElementSkill(SkillBase):
                     ),
                 }
 
-            import pyautogui
-
             x, y = int(el["x"]), int(el["y"])
-            logging.info(
-                f"[desktop_skill] Clicking element {number}: "
-                f"'{el['text']}' at logical ({x}, {y})"
-            )
-            pyautogui.click(x, y)
-            await asyncio.sleep(0.5)
-            return {
+            loop = asyncio.get_event_loop()
+
+            # ── 클릭 전: 타깃 강조 이미지 생성 (저장된 원본 재활용, OCR 불필요) ──
+            before_b64: str | None = None
+            if _last_raw_img is not None:
+                before_b64 = await loop.run_in_executor(
+                    None,
+                    lambda: _render_overlay(_last_raw_img, _element_map, _last_scale, highlight=number),
+                )
+                logging.info(f"[desktop_skill] Before-click preview rendered (element {number})")
+
+            # ── 클릭 실행 ────────────────────────────────────────────────────
+            logging.info(f"[desktop_skill] Clicking element {number}: '{el['text']}' at ({x}, {y})")
+            diag = await loop.run_in_executor(None, lambda: _do_click(x, y))
+            await asyncio.sleep(0.6)  # UI 반응 대기
+
+            # ── 클릭 후: 새 스크린샷 캡처 + element_map 갱신 ─────────────────
+            after_b64, new_map = await loop.run_in_executor(None, _build_annotated_screenshot)
+            _element_map = new_map
+            logging.info(f"[desktop_skill] After-click screenshot captured ({len(new_map)} elements)")
+
+            result: dict = {
                 "status": "success",
-                "message": f"요소 {number} ('{el['text']}') 클릭 완료 — 좌표 ({x}, {y})",
+                "message": (
+                    f"요소 {number} ('{el['text']}') 클릭 완료 — 좌표 ({x}, {y}), "
+                    f"커서 이동={'성공' if diag['cursor_ok'] else '실패(좌표 이상)'}"
+                ),
                 "x": x,
                 "y": y,
+                "cursor_ok": diag["cursor_ok"],
+                "cursor_at": diag["cursor_at"],
+                "elements": {str(n): info["text"] for n, info in new_map.items()},
             }
+            # 이미지는 orchestrator가 images_base64 리스트로 처리
+            images: list[str] = []
+            if before_b64:
+                images.append(before_b64)
+            images.append(after_b64)
+            result["images_base64"] = images
+            return result
+
         except Exception as e:
             logging.error(
                 f"[desktop_skill] desktop_click_element failed: {e}", exc_info=True
@@ -349,21 +484,22 @@ class DesktopClickXYSkill(SkillBase):
     async def run(
         self, x: float, y: float, double_click: bool = False, **kwargs
     ) -> dict:
-        logging.info(
-            f"[desktop_skill] desktop_click_xy: ({x}, {y}) double={double_click}"
-        )
+        logging.info(f"[desktop_skill] desktop_click_xy: ({x}, {y}) double={double_click}")
         try:
-            import pyautogui
-
-            if double_click:
-                pyautogui.doubleClick(int(x), int(y))
-            else:
-                pyautogui.click(int(x), int(y))
+            loop = asyncio.get_event_loop()
+            diag = await loop.run_in_executor(
+                None, lambda: _do_click(int(x), int(y), double=double_click)
+            )
             await asyncio.sleep(0.3)
             action = "더블클릭" if double_click else "클릭"
             return {
                 "status": "success",
-                "message": f"좌표 ({int(x)}, {int(y)}) {action} 완료",
+                "message": (
+                    f"좌표 ({int(x)}, {int(y)}) {action} 완료, "
+                    f"커서 이동={'성공' if diag['cursor_ok'] else '실패(좌표 이상)'}"
+                ),
+                "cursor_ok": diag["cursor_ok"],
+                "cursor_at": diag["cursor_at"],
             }
         except Exception as e:
             logging.error(f"[desktop_skill] desktop_click_xy failed: {e}", exc_info=True)
@@ -391,7 +527,7 @@ class DesktopTypeSkill(SkillBase):
         "required": ["text"],
     }
 
-    async def run(self, text: str, press_enter: bool = False, **kwargs) -> dict:
+    async def run(self, text: str, press_enter: bool = False, **kwargs) -> dict:  # noqa: E501
         logging.info(f"[desktop_skill] desktop_type: text={text!r} enter={press_enter}")
         try:
             import pyperclip
@@ -407,3 +543,98 @@ class DesktopTypeSkill(SkillBase):
         except Exception as e:
             logging.error(f"[desktop_skill] desktop_type failed: {e}", exc_info=True)
             return {"status": "error", "message": f"텍스트 입력 오류: {e}"}
+
+
+# ── 스킬 5: 마우스 이동 (진단용) ─────────────────────────────────────────────
+
+class DesktopMouseMoveSkill(SkillBase):
+    name = "desktop_mouse_move"
+    description = (
+        "클릭 없이 마우스 커서만 지정 좌표로 이동합니다. "
+        "클릭이 안 될 때 좌표가 올바른지 눈으로 확인하는 진단용 스킬입니다. "
+        "커서가 원하는 위치로 이동하면 좌표는 맞고 권한 문제일 가능성이 높습니다. "
+        "커서가 엉뚱한 곳으로 가면 DPI 스케일 문제입니다."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "x": {"type": "number", "description": "이동할 X 좌표 (논리 픽셀)"},
+            "y": {"type": "number", "description": "이동할 Y 좌표 (논리 픽셀)"},
+        },
+        "required": ["x", "y"],
+    }
+
+    async def run(self, x: float, y: float, **kwargs) -> dict:
+        logging.info(f"[desktop_skill] desktop_mouse_move: ({x}, {y})")
+        try:
+            loop = asyncio.get_event_loop()
+            before = await loop.run_in_executor(None, _cursor_pos)
+            actual = await loop.run_in_executor(None, lambda: _move_cursor(int(x), int(y)))
+            cursor_ok = abs(actual[0] - int(x)) <= 2 and abs(actual[1] - int(y)) <= 2
+            logging.info(
+                f"[desktop_skill] mouse_move before={before} target=({int(x)},{int(y)}) "
+                f"actual={actual} ok={cursor_ok}"
+            )
+            return {
+                "status": "success",
+                "target": (int(x), int(y)),
+                "actual": actual,
+                "cursor_ok": cursor_ok,
+                "message": (
+                    f"커서를 ({int(x)}, {int(y)})로 이동했습니다. "
+                    f"실제 위치: {actual}. "
+                    + ("좌표 정확함." if cursor_ok else "좌표 불일치 — DPI 스케일 확인 필요.")
+                ),
+            }
+        except Exception as e:
+            logging.error(f"[desktop_skill] desktop_mouse_move failed: {e}", exc_info=True)
+            return {"status": "error", "message": f"마우스 이동 오류: {e}"}
+
+
+# ── 스킬 6: UIA 클릭 (elevated 앱 대응) ──────────────────────────────────────
+
+class DesktopUiaClickXYSkill(SkillBase):
+    name = "desktop_uia_click_xy"
+    description = (
+        "UIA(UI Automation) InvokePattern으로 좌표의 요소를 클릭합니다. "
+        "pyautogui 클릭(SendInput)이 권한 문제(UIPI)로 차단될 때 사용하세요. "
+        "관리자 권한으로 실행 중인 앱(EES UI 등)의 버튼 클릭에 효과적입니다."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "x": {"type": "number", "description": "클릭할 X 좌표 (논리 픽셀)"},
+            "y": {"type": "number", "description": "클릭할 Y 좌표 (논리 픽셀)"},
+        },
+        "required": ["x", "y"],
+    }
+
+    async def run(self, x: float, y: float, **kwargs) -> dict:
+        logging.info(f"[desktop_skill] desktop_uia_click_xy: ({x}, {y})")
+        try:
+            # 커서를 먼저 이동해 시각적으로 위치 확인 가능하게 함
+            loop = asyncio.get_event_loop()
+            actual = await loop.run_in_executor(None, lambda: _move_cursor(int(x), int(y)))
+            await asyncio.sleep(0.1)
+
+            ok = await loop.run_in_executor(None, lambda: _try_uia_invoke(int(x), int(y)))
+            await asyncio.sleep(0.3)
+
+            if ok:
+                return {
+                    "status": "success",
+                    "message": f"UIA 클릭 완료 — 좌표 ({int(x)}, {int(y)}), 커서 위치={actual}",
+                    "cursor_at": actual,
+                }
+            else:
+                return {
+                    "status": "not_invoked",
+                    "message": (
+                        f"좌표 ({int(x)}, {int(y)})의 요소가 InvokePattern을 지원하지 않습니다. "
+                        "서버를 관리자 권한으로 실행한 뒤 desktop_click_xy를 사용해 주세요."
+                    ),
+                    "cursor_at": actual,
+                }
+        except Exception as e:
+            logging.error(f"[desktop_skill] desktop_uia_click_xy failed: {e}", exc_info=True)
+            return {"status": "error", "message": f"UIA 클릭 오류: {e}"}
