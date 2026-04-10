@@ -78,34 +78,58 @@ def _try_uia_invoke(x: int, y: int) -> bool:
     return False
 
 
+def _diagnose_cursor(x: int, y: int) -> dict:
+    """
+    SetCursorPos 동작 여부와 ClipCursor 제한 여부를 진단합니다.
+    실제 클릭과 무관하게 진단 정보만 수집합니다.
+    """
+    # ClipCursor 확인 (사내 정책 또는 앱이 마우스를 특정 영역에 가두는지)
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    clip_rect = RECT()
+    ctypes.windll.user32.GetClipCursor(ctypes.byref(clip_rect))
+    clip_info = f"({clip_rect.left},{clip_rect.top})-({clip_rect.right},{clip_rect.bottom})"
+
+    before = _cursor_pos()
+    ret = ctypes.windll.user32.SetCursorPos(x, y)  # BOOL 반환값 체크
+    time.sleep(0.05)
+    after = _cursor_pos()
+    cursor_ok = abs(after[0] - x) <= 2 and abs(after[1] - y) <= 2
+
+    logging.info(
+        f"[desktop_skill] cursor diag | target=({x},{y}) before={before} after={after} "
+        f"SetCursorPos_ret={ret} cursor_ok={cursor_ok} clip={clip_info}"
+    )
+    return {"cursor_ok": cursor_ok, "cursor_at": after, "clip": clip_info,
+            "set_cursor_pos_ret": ret}
+
+
 def _do_click(x: int, y: int, double: bool = False) -> dict:
     """
-    1. SetCursorPos로 커서 이동 (항상 동작)
-    2. pyautogui로 현재 커서 위치 클릭 (SendInput; elevated 앱엔 차단될 수 있음)
-    클릭 전후 커서 좌표를 로그에 기록합니다.
+    pyautogui.click(x, y)로 이동+클릭을 SendInput 한 번에 처리합니다.
+    (pyautogui.press와 동일 경로 — SetCursorPos와 별개)
+    SetCursorPos 진단은 별도로 수행해 로그에만 기록합니다.
     """
     import pyautogui  # type: ignore
 
-    before = _cursor_pos()
-    actual = _move_cursor(x, y)
-    cursor_ok = abs(actual[0] - x) <= 2 and abs(actual[1] - y) <= 2
+    # 진단: SetCursorPos가 동작하는지 확인 (클릭과 무관)
+    diag = _diagnose_cursor(x, y)
 
-    logging.info(
-        f"[desktop_skill] click target=({x},{y}) "
-        f"before={before} after={actual} cursor_ok={cursor_ok}"
-    )
-
-    # 좌표 없이 호출 → 현재 커서 위치에서 클릭 (SetCursorPos 이동 결과 활용)
+    # 실제 클릭: SendInput으로 이동 + 클릭 (pyautogui.press와 같은 경로)
+    logging.info(f"[desktop_skill] SendInput click at ({x},{y}) double={double}")
     if double:
-        pyautogui.doubleClick()
+        pyautogui.doubleClick(x, y)
     else:
-        pyautogui.click()
+        pyautogui.click(x, y)
 
     time.sleep(0.1)
     after_click = _cursor_pos()
-    logging.info(f"[desktop_skill] cursor after click={after_click}")
+    logging.info(f"[desktop_skill] cursor after SendInput click={after_click}")
 
-    return {"cursor_ok": cursor_ok, "cursor_at": actual}
+    return {"cursor_ok": diag["cursor_ok"], "cursor_at": diag["cursor_at"],
+            "clip": diag["clip"]}
 
 # 마지막 screenshot 상태 (클릭 미리보기 렌더링에 재사용)
 _element_map: dict[int, dict] = {}
@@ -568,23 +592,25 @@ class DesktopMouseMoveSkill(SkillBase):
         logging.info(f"[desktop_skill] desktop_mouse_move: ({x}, {y})")
         try:
             loop = asyncio.get_event_loop()
-            before = await loop.run_in_executor(None, _cursor_pos)
-            actual = await loop.run_in_executor(None, lambda: _move_cursor(int(x), int(y)))
-            cursor_ok = abs(actual[0] - int(x)) <= 2 and abs(actual[1] - int(y)) <= 2
-            logging.info(
-                f"[desktop_skill] mouse_move before={before} target=({int(x)},{int(y)}) "
-                f"actual={actual} ok={cursor_ok}"
-            )
+            diag = await loop.run_in_executor(None, lambda: _diagnose_cursor(int(x), int(y)))
+            if diag["cursor_ok"]:
+                msg = f"커서가 ({int(x)}, {int(y)})로 이동했습니다. 좌표 정확."
+            else:
+                msg = (
+                    f"SetCursorPos 반환={diag['set_cursor_pos_ret']}, "
+                    f"실제 커서={diag['cursor_at']} (목표={int(x)},{int(y)}). "
+                    f"ClipCursor 영역={diag['clip']}. "
+                    + ("ClipCursor로 커서가 제한된 것 같습니다."
+                       if diag['set_cursor_pos_ret'] else "SetCursorPos 자체가 실패했습니다.")
+                )
             return {
                 "status": "success",
                 "target": (int(x), int(y)),
-                "actual": actual,
-                "cursor_ok": cursor_ok,
-                "message": (
-                    f"커서를 ({int(x)}, {int(y)})로 이동했습니다. "
-                    f"실제 위치: {actual}. "
-                    + ("좌표 정확함." if cursor_ok else "좌표 불일치 — DPI 스케일 확인 필요.")
-                ),
+                "cursor_at": diag["cursor_at"],
+                "cursor_ok": diag["cursor_ok"],
+                "set_cursor_pos_ret": diag["set_cursor_pos_ret"],
+                "clip": diag["clip"],
+                "message": msg,
             }
         except Exception as e:
             logging.error(f"[desktop_skill] desktop_mouse_move failed: {e}", exc_info=True)
