@@ -32,8 +32,8 @@ _focused_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bot
 _focused_title: str | None = None
 
 # 마지막 스크린샷 정보 (클릭 좌표 변환에 사용)
-_last_offset: tuple[int, int] = (0, 0)      # 캡처 영역의 화면 좌상단 좌표
-_last_img_size: tuple[int, int] = (0, 0)     # 캡처 이미지 크기
+_last_offset: tuple[int, int] = (0, 0)      # 캡처 영역의 pyautogui 좌표 (left, top)
+_last_scale: tuple[float, float] = (1.0, 1.0)  # 이미지 px / pyautogui 좌표
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -91,42 +91,61 @@ def _focus_window(keyword: str) -> str | None:
 
 def _capture() -> "Image.Image":
     """
-    pyautogui.screenshot으로 캡처 (pyautogui 좌표 공간 보장).
-    포커스 창이 있으면 해당 영역만, 없으면 전체 화면.
+    전체 화면을 캡처한 뒤, 포커스 창 영역만 직접 crop합니다.
+    스케일 보정:
+      full_img.size  = 물리 해상도 (예: 2880x1620)
+      pyautogui.size = 논리 해상도 (예: 1920x1080)
+      scale = 물리/논리 (예: 1.5)
+      crop은 논리 좌표 * scale 로 이미지 픽셀 좌표로 변환해서 수행.
     """
-    global _last_offset, _last_img_size, _focused_rect, _focused_hwnd
+    global _last_offset, _last_scale, _focused_rect, _focused_hwnd
     import pyautogui
 
-    region = None
-    offset_x, offset_y = 0, 0
+    # 1) 전체 화면 캡처
+    full = pyautogui.screenshot()
+    gui_w, gui_h = pyautogui.size()
+    img_w, img_h = full.size
+    scale_x = img_w / gui_w
+    scale_y = img_h / gui_h
 
+    logging.info(
+        f"[desktop] full capture: img={full.size} gui=({gui_w},{gui_h}) "
+        f"scale=({scale_x:.3f},{scale_y:.3f})"
+    )
+
+    # 2) 포커스 창 영역으로 crop
+    offset_x, offset_y = 0, 0  # pyautogui 좌표 공간
     if _focused_hwnd is not None:
-        # 창이 이동했을 수 있으므로 RECT 갱신
         rect = ctypes.wintypes.RECT()
         if ctypes.windll.user32.GetWindowRect(_focused_hwnd, ctypes.byref(rect)):
             _focused_rect = (rect.left, rect.top, rect.right, rect.bottom)
             left, top, right, bottom = _focused_rect
-            region = (left, top, right - left, bottom - top)
             offset_x, offset_y = left, top
-
-    if region:
-        img = pyautogui.screenshot(region=region)
-    else:
-        img = pyautogui.screenshot()
+            # 논리 좌표 → 이미지 픽셀 좌표로 변환해서 crop
+            crop_box = (
+                int(left * scale_x), int(top * scale_y),
+                int(right * scale_x), int(bottom * scale_y),
+            )
+            full = full.crop(crop_box)
+            logging.info(
+                f"[desktop] window rect(gui): ({left},{top},{right},{bottom}) "
+                f"→ crop(px): {crop_box} → cropped: {full.size}"
+            )
 
     _last_offset = (offset_x, offset_y)
-    _last_img_size = img.size
-
-    logging.info(
-        f"[desktop] captured {img.size} offset=({offset_x},{offset_y}) "
-        f"region={region} screen={pyautogui.size()}"
-    )
-    return img
+    _last_scale = (scale_x, scale_y)
+    return full
 
 
 def _img_to_screen(img_x: int, img_y: int) -> tuple[int, int]:
-    """이미지 내 좌표 → 화면 절대 좌표 (pyautogui.click에 사용)."""
-    return (_last_offset[0] + img_x, _last_offset[1] + img_y)
+    """
+    이미지 내 좌표 → pyautogui 화면 절대 좌표.
+    이미지 픽셀은 물리 해상도이므로 scale로 나눠서 논리 좌표로 변환 후 offset 더함.
+    """
+    sx, sy = _last_scale
+    gui_x = int(img_x / sx) + _last_offset[0]
+    gui_y = int(img_y / sy) + _last_offset[1]
+    return (gui_x, gui_y)
 
 
 # ── 스킬 1: 창 포커스 ────────────────────────────────────────────────────────
