@@ -66,12 +66,13 @@ def _get_client_bbox(hwnd: int) -> tuple[int, int, int, int]:
     return (pt.x, pt.y, pt.x + client.right - client.left, pt.y + client.bottom - client.top)
 
 
-def _focus_window(keyword: str) -> str | None:
-    """keyword를 포함하는 창을 찾아 포그라운드로 가져옴."""
-    global _focused_hwnd, _focused_title
+_FOCUS_TIMEOUT = 10.0   # 창 탐색 최대 대기 시간 (초)
+_FOCUS_INTERVAL = 1.0   # 폴링 간격 (초)
 
+
+def _find_window_once(kw: str) -> tuple[int, str] | None:
+    """keyword를 포함하는 창을 1회 탐색. 찾으면 (hwnd, title), 없으면 None."""
     found: list[tuple[int, str]] = []
-    kw = keyword.lower()
     EnumProc = ctypes.WINFUNCTYPE(
         ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
     )
@@ -90,19 +91,36 @@ def _focus_window(keyword: str) -> str | None:
         return True
 
     ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
+    return found[0] if found else None
 
-    if not found:
-        _focused_hwnd = _focused_title = None
-        return None
 
-    hwnd, title = found[0]
-    ctypes.windll.user32.ShowWindow(hwnd, 9)
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
-    _focused_hwnd = hwnd
-    _focused_title = title
+def _focus_window(keyword: str) -> str | None:
+    """
+    keyword를 포함하는 창을 찾아 포그라운드로 가져옴.
+    프로그램 실행이 느릴 수 있으므로 최대 10초간 1초 간격으로 폴링합니다.
+    """
+    global _focused_hwnd, _focused_title
 
-    logging.info(f"[desktop] focused: hwnd={hwnd} title={title!r}")
-    return title
+    kw = keyword.lower()
+    elapsed = 0.0
+
+    while elapsed < _FOCUS_TIMEOUT:
+        result = _find_window_once(kw)
+        if result:
+            hwnd, title = result
+            ctypes.windll.user32.ShowWindow(hwnd, 9)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            _focused_hwnd = hwnd
+            _focused_title = title
+            logging.info(f"[desktop] focused: hwnd={hwnd} title={title!r} (after {elapsed:.1f}s)")
+            return title
+        logging.info(f"[desktop] waiting for '{keyword}'... ({elapsed:.1f}s / {_FOCUS_TIMEOUT}s)")
+        time.sleep(_FOCUS_INTERVAL)
+        elapsed += _FOCUS_INTERVAL
+
+    _focused_hwnd = _focused_title = None
+    logging.warning(f"[desktop] window '{keyword}' not found after {_FOCUS_TIMEOUT}s")
+    return None
 
 
 def _capture() -> "Image.Image":
