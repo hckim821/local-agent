@@ -82,24 +82,30 @@ _focused_title: str | None = None
 
 # ── DPI 스케일 보정 ───────────────────────────────────────────────────────────
 
-def _get_dpi_scale(img: "Image.Image") -> tuple[float, float]:
+def _get_capture_scale(
+    img: "Image.Image",
+    bbox: tuple[int, int, int, int] | None,
+) -> tuple[float, float]:
     """
-    캡처된 이미지 크기와 pyautogui 좌표 공간의 비율을 반환.
-    동일한 이미지를 사용하므로 크기 불일치 가능성 없음.
+    캡처된 이미지 픽셀과 해당 화면 영역의 비율을 반환.
+    bbox가 있으면 bbox 크기와 비교, 없으면 전체 화면과 비교.
+    DPI 스케일이 걸려 있으면 1.0이 아닌 값이 나옴.
     """
-    try:
+    img_w, img_h = img.size
+    if bbox:
+        area_w = bbox[2] - bbox[0]
+        area_h = bbox[3] - bbox[1]
+    else:
         import pyautogui
-        gui_w, gui_h = pyautogui.size()
-        img_w, img_h = img.size
-        scale_x = img_w / gui_w
-        scale_y = img_h / gui_h
-        logging.info(
-            f"[desktop_skill] DPI check: pyautogui=({gui_w}x{gui_h}) "
-            f"image=({img_w}x{img_h}) scale=({scale_x:.3f}, {scale_y:.3f})"
-        )
-        return scale_x, scale_y
-    except Exception:
-        return 1.0, 1.0
+        area_w, area_h = pyautogui.size()
+
+    scale_x = img_w / area_w if area_w else 1.0
+    scale_y = img_h / area_h if area_h else 1.0
+    logging.info(
+        f"[desktop_skill] capture scale: image=({img_w}x{img_h}) "
+        f"area=({area_w}x{area_h}) scale=({scale_x:.3f}, {scale_y:.3f})"
+    )
+    return scale_x, scale_y
 
 
 # ── 창 포커스 helpers ─────────────────────────────────────────────────────────
@@ -252,9 +258,9 @@ def _build_annotated_screenshot() -> tuple[str, dict, str]:
         img = ImageGrab.grab()
     _last_raw_img = img.copy()
 
-    scale_x, scale_y = _get_dpi_scale(img)
+    scale_x, scale_y = _get_capture_scale(img, bbox)
     _last_scale = (scale_x, scale_y)
-    logging.info(f"[desktop_skill] Captured image: {img.size}, offset=({offset_x},{offset_y})")
+    logging.info(f"[desktop_skill] Captured image: {img.size}, bbox={bbox}, offset=({offset_x},{offset_y})")
 
     elements: list[dict] = []
     ocr_status = ""
