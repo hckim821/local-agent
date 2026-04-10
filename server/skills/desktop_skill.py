@@ -49,8 +49,55 @@ _last_scale: tuple[float, float] = (1.0, 1.0)  # 이미지 픽셀 / 화면 좌�
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def _draw_grid(img: "Image.Image") -> "Image.Image":
+    """
+    이미지 가장자리에 픽셀 좌표 눈금을 그립니다.
+    LLM이 리사이즈된 이미지를 보더라도 눈금 숫자를 읽어 원본 좌표를 추정할 수 있게 합니다.
+    """
+    from PIL import ImageDraw, ImageFont
+
+    img = img.copy()
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+    except Exception:
+        font = ImageFont.load_default()
+
+    # 눈금 간격: 이미지 크기에 따라 100px 또는 200px 단위
+    step = 100 if max(w, h) < 1500 else 200
+    tick_len = 10
+    color = (255, 0, 0)
+    bg = (255, 255, 255)
+
+    # 상단 가로 눈금
+    for x in range(0, w, step):
+        draw.line([(x, 0), (x, tick_len)], fill=color, width=1)
+        label = str(x)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw = bbox[2] - bbox[0]
+        tx = max(0, min(x - tw // 2, w - tw))
+        draw.rectangle([tx - 1, tick_len, tx + tw + 1, tick_len + 16], fill=bg)
+        draw.text((tx, tick_len), label, fill=color, font=font)
+
+    # 좌측 세로 눈금
+    for y in range(0, h, step):
+        draw.line([(0, y), (tick_len, y)], fill=color, width=1)
+        label = str(y)
+        bbox = draw.textbbox((0, 0), label, font=font)
+        th = bbox[3] - bbox[1]
+        ty = max(0, min(y - th // 2, h - th))
+        tw = bbox[2] - bbox[0]
+        draw.rectangle([tick_len, ty - 1, tick_len + tw + 2, ty + th + 1], fill=bg)
+        draw.text((tick_len + 1, ty), label, fill=color, font=font)
+
+    return img
+
+
 def _img_to_b64(img: "Image.Image") -> str:
-    """이미지를 JPEG 압축 후 base64 반환."""
+    """이미지에 좌표 눈금을 그린 후 JPEG 압축해 base64 반환."""
+    img = _draw_grid(img)
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=_JPEG_QUALITY)
     return base64.b64encode(buf.getvalue()).decode()
