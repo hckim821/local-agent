@@ -74,6 +74,11 @@ _element_map: dict[int, dict] = {}
 _last_raw_img: "Image.Image | None" = None   # OCR 전 원본 이미지
 _last_scale: tuple[float, float] = (1.0, 1.0)  # 캡처 시 DPI 스케일
 
+# 포커스된 창 정보
+_focused_hwnd: int | None = None
+_focused_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom)
+_focused_title: str | None = None
+
 
 # ── DPI 스케일 보정 ───────────────────────────────────────────────────────────
 
@@ -102,8 +107,10 @@ def _get_dpi_scale(img: "Image.Image") -> tuple[float, float]:
 def _focus_window_by_keyword(keyword: str) -> str | None:
     """
     keyword를 포함하는 최상위 창을 찾아 포그라운드로 가져옵니다.
-    성공 시 창 제목, 실패 시 None 반환.
+    성공 시 창 제목 반환, HWND와 RECT를 모듈 변수에 저장.
     """
+    global _focused_hwnd, _focused_rect, _focused_title
+
     found_hwnd: list[int] = []
     found_title: list[str] = []
     kw = keyword.lower()
@@ -129,13 +136,28 @@ def _focus_window_by_keyword(keyword: str) -> str | None:
     ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
 
     if not found_hwnd:
+        _focused_hwnd = None
+        _focused_rect = None
+        _focused_title = None
         return None
 
     hwnd = found_hwnd[0]
     SW_RESTORE = 9
     ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)   # 최소화 복원
     ctypes.windll.user32.SetForegroundWindow(hwnd)       # 포그라운드
-    return found_title[0]
+
+    # 창 영역 저장
+    rect = ctypes.wintypes.RECT()
+    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    _focused_hwnd = hwnd
+    _focused_rect = (rect.left, rect.top, rect.right, rect.bottom)
+    _focused_title = found_title[0]
+
+    logging.info(
+        f"[desktop_skill] Window focused: hwnd={hwnd} "
+        f"rect={_focused_rect} title={_focused_title!r}"
+    )
+    return _focused_title
 
 
 # ── OCR + 오버레이 ────────────────────────────────────────────────────────────
@@ -164,35 +186,36 @@ def _render_overlay(
         font_hl = font
 
     for i, el in element_map.items():
-        phys_x = int(el["x"] * scale_x)
-        phys_y = int(el["y"] * scale_y)
+        # 오버레이는 이미지 내 좌표로 그림
+        ix = el.get("img_x", el["x"])
+        iy = el.get("img_y", el["y"])
 
         if i == highlight:
-            # 빨간 십자선: 클릭할 정확한 위치를 화면 전체에 표시
+            # 빨간 십자선: 클릭할 정확한 위치를 이미지 전체에 표시
             cross_color = (255, 40, 40, 180)
-            draw.line([(phys_x, 0), (phys_x, img_h)], fill=cross_color, width=2)
-            draw.line([(0, phys_y), (img_w, phys_y)], fill=cross_color, width=2)
+            draw.line([(ix, 0), (ix, img_h)], fill=cross_color, width=2)
+            draw.line([(0, iy), (img_w, iy)], fill=cross_color, width=2)
             # 강조 원
             r = 16
-            draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r],
+            draw.ellipse([ix - r, iy - r, ix + r, iy + r],
                          fill=(30, 200, 80, 230), outline=(255, 255, 255, 255), width=2)
             label = str(i)
             bbox = draw.textbbox((0, 0), label, font=font_hl)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            draw.text((phys_x - tw / 2, phys_y - th / 2), label,
+            draw.text((ix - tw / 2, iy - th / 2), label,
                       fill=(255, 255, 255, 255), font=font_hl)
-            # 좌표 표시
+            # 화면 절대 좌표 표시
             coord_text = f"click→({el['x']},{el['y']})"
-            draw.text((phys_x + r + 4, phys_y - 8), coord_text,
+            draw.text((ix + r + 4, iy - 8), coord_text,
                       fill=(255, 40, 40, 230), font=font)
         else:
             r = 11
-            draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r],
+            draw.ellipse([ix - r, iy - r, ix + r, iy + r],
                          fill=(255, 80, 0, 180))
             label = str(i)
             bbox = draw.textbbox((0, 0), label, font=font)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            draw.text((phys_x - tw / 2, phys_y - th / 2), label,
+            draw.text((ix - tw / 2, iy - th / 2), label,
                       fill=(255, 255, 255, 255), font=font)
 
     combined = Image.alpha_composite(img_rgba, overlay).convert("RGB")
@@ -201,20 +224,40 @@ def _render_overlay(
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _build_annotated_screenshot() -> tuple[str, dict]:
+def _build_annotated_screenshot() -> tuple[str, dict, str]:
     """
-    전체 화면 스크린샷을 찍고 OCR로 텍스트 영역을 감지해 번호 마커를 오버레이합니다.
-    좌표는 DPI 스케일을 보정해 pyautogui 논리 좌표로 저장합니다.
-    pytesseract가 없으면 마커 없이 원본 이미지만 반환합니다.
-    반환: (base64 PNG 문자열, element_map)
-    """
-    global _last_raw_img, _last_scale
-    img = ImageGrab.grab()  # 전체 모니터 캡처
-    _last_raw_img = img.copy()
-    scale_x, scale_y = _get_dpi_scale(img)  # 동일 이미지로 scale 계산
+    포커스된 창 영역만 캡처하고 OCR로 텍스트를 감지해 번호 마커를 오버레이합니다.
+    _focused_rect가 없으면 전체 화면을 캡처합니다.
 
+    반환: (base64 PNG, element_map, ocr_status 메시지)
+    element_map의 좌표는 화면 절대 좌표 (pyautogui.click에 직접 사용 가능).
+    """
+    global _last_raw_img, _last_scale, _focused_rect, _focused_hwnd
+
+    # ── 포커스 창 RECT 갱신 (창이 이동했을 수 있으므로) ──────────────────────
+    offset_x, offset_y = 0, 0
+    bbox = None
+    if _focused_hwnd is not None:
+        rect = ctypes.wintypes.RECT()
+        if ctypes.windll.user32.GetWindowRect(_focused_hwnd, ctypes.byref(rect)):
+            _focused_rect = (rect.left, rect.top, rect.right, rect.bottom)
+            bbox = _focused_rect
+            offset_x, offset_y = rect.left, rect.top
+            logging.info(f"[desktop_skill] Capturing window rect: {_focused_rect}")
+
+    # ── 캡처 ─────────────────────────────────────────────────────────────────
+    if bbox:
+        img = ImageGrab.grab(bbox=bbox)
+    else:
+        img = ImageGrab.grab()
+    _last_raw_img = img.copy()
+
+    scale_x, scale_y = _get_dpi_scale(img)
     _last_scale = (scale_x, scale_y)
+    logging.info(f"[desktop_skill] Captured image: {img.size}, offset=({offset_x},{offset_y})")
+
     elements: list[dict] = []
+    ocr_status = ""
 
     # ── OCR로 텍스트 영역 탐색 ──────────────────────────────────────────────
     try:
@@ -230,28 +273,42 @@ def _build_annotated_screenshot() -> tuple[str, dict]:
             text = data["text"][i].strip()
             conf = int(data["conf"][i])
             w, h = data["width"][i], data["height"][i]
-            if text and conf > 60 and w > 8 and h > 8:
-                phys_cx = data["left"][i] + w // 2
-                phys_cy = data["top"][i] + h // 2
-                elements.append(
-                    {
-                        "text": text,
-                        "x": int(phys_cx / scale_x),
-                        "y": int(phys_cy / scale_y),
-                    }
-                )
-        logging.info(f"[desktop_skill] OCR detected {len(elements)} text regions")
+            if text and conf > 40 and w > 5 and h > 5:
+                # 이미지 내 상대 좌표 (오버레이 그리기용)
+                img_cx = data["left"][i] + w // 2
+                img_cy = data["top"][i] + h // 2
+                # 화면 절대 좌표 (pyautogui 클릭용)
+                screen_x = int(img_cx / scale_x) + offset_x
+                screen_y = int(img_cy / scale_y) + offset_y
+                elements.append({
+                    "text": text,
+                    "screen_x": screen_x,
+                    "screen_y": screen_y,
+                    "img_x": img_cx,
+                    "img_y": img_cy,
+                })
+        ocr_status = f"OCR 감지 완료: {len(elements)}개 텍스트 요소"
+        logging.info(f"[desktop_skill] {ocr_status}")
+    except ImportError:
+        ocr_status = "⚠ pytesseract 미설치 — pip install pytesseract 필요"
+        logging.error(f"[desktop_skill] {ocr_status}")
     except Exception as e:
-        logging.warning(f"[desktop_skill] OCR unavailable ({e}); returning plain screenshot")
+        ocr_status = f"⚠ OCR 실패: {e}"
+        logging.error(f"[desktop_skill] {ocr_status}")
 
+    # element_map: "x","y" = 화면 절대 좌표 / "img_x","img_y" = 이미지 내 좌표
     element_map: dict[int, dict] = {
-        i: {"x": el["x"], "y": el["y"], "text": el["text"]}
+        i: {
+            "x": el["screen_x"], "y": el["screen_y"],
+            "img_x": el["img_x"], "img_y": el["img_y"],
+            "text": el["text"],
+        }
         for i, el in enumerate(elements, start=1)
     }
 
-    # 오버레이 렌더링 (_render_overlay 공통 함수 사용)
+    # 오버레이 렌더링 — 이미지 내 좌표 사용
     b64 = _render_overlay(img, element_map, (scale_x, scale_y))
-    return b64, element_map
+    return b64, element_map, ocr_status
 
 
 # ── 스킬 0: 창 포커스 ────────────────────────────────────────────────────────
@@ -285,10 +342,12 @@ class DesktopFocusWindowSkill(SkillBase):
             if title:
                 await asyncio.sleep(0.5)  # 포그라운드 전환 안정화
                 logging.info(f"[desktop_skill] Window focused: {title!r}")
+                rect_msg = f" 영역: {_focused_rect}" if _focused_rect else ""
                 return {
                     "status": "success",
                     "window_title": title,
-                    "message": f"'{title}' 창을 포그라운드로 가져왔습니다. 이제 desktop_screenshot을 실행하세요.",
+                    "window_rect": _focused_rect,
+                    "message": f"'{title}' 창을 포그라운드로 가져왔습니다.{rect_msg} 이제 desktop_screenshot을 실행하세요.",
                 }
             else:
                 return {
@@ -320,20 +379,20 @@ class DesktopScreenshotSkill(SkillBase):
         logging.info("[desktop_skill] desktop_screenshot called")
         try:
             loop = asyncio.get_event_loop()
-            b64, _element_map = await loop.run_in_executor(
+            b64, _element_map, ocr_status = await loop.run_in_executor(
                 None, _build_annotated_screenshot
             )
 
-            import pyautogui
-            w, h = pyautogui.size()
             elements_summary = {str(n): info["text"] for n, info in _element_map.items()}
+            window_info = f"창: {_focused_title!r}" if _focused_title else "전체 화면"
             logging.info(
-                f"[desktop_skill] Screenshot ready ({w}x{h} logical), "
+                f"[desktop_skill] Screenshot ready ({window_info}), "
                 f"{len(_element_map)} elements annotated"
             )
             return {
                 "status": "success",
-                "resolution": f"{w}x{h}",
+                "window": window_info,
+                "ocr_status": ocr_status,
                 "elements": elements_summary,
                 "image_base64": b64,
             }
@@ -398,7 +457,7 @@ class DesktopClickElementSkill(SkillBase):
             await asyncio.sleep(0.6)  # UI 반응 대기
 
             # ── 클릭 후: 새 스크린샷 캡처 + element_map 갱신 ─────────────────
-            after_b64, new_map = await loop.run_in_executor(None, _build_annotated_screenshot)
+            after_b64, new_map, _ = await loop.run_in_executor(None, _build_annotated_screenshot)
             _element_map = new_map
             logging.info(f"[desktop_skill] After-click screenshot captured ({len(new_map)} elements)")
 
