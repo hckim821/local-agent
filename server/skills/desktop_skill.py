@@ -33,103 +33,41 @@ from PIL import Image, ImageDraw, ImageFont, ImageGrab
 from .skill_base import SkillBase
 
 
-# ── 클릭 helpers ──────────────────────────────────────────────────────────────
-
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-def _cursor_pos() -> tuple[int, int]:
-    pt = _POINT()
-    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
-
-
-def _move_cursor(x: int, y: int) -> tuple[int, int]:
-    """SetCursorPos로 커서 이동 (UIPI 무관, 항상 동작). 실제 이동 좌표 반환."""
-    ctypes.windll.user32.SetCursorPos(x, y)
-    time.sleep(0.05)
-    return _cursor_pos()
-
-
-def _try_uia_invoke(x: int, y: int) -> bool:
-    """
-    UIA InvokePattern으로 클릭합니다.
-    pyautogui(SendInput)가 UIPI로 차단될 때(elevated 앱) 우회 수단.
-    버튼·링크처럼 InvokePattern을 구현한 요소에만 동작합니다.
-    """
+# ── DPI awareness 설정 ────────────────────────────────────────────────────────
+# ImageGrab(PIL)과 pyautogui가 동일한 좌표 공간(물리 픽셀)을 사용하도록 설정.
+# 이 호출이 없으면 ImageGrab은 물리 해상도, pyautogui는 논리 해상도를 써서
+# 좌표가 DPI 배율만큼 어긋남.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    logging.info("[desktop_skill] DPI awareness: PROCESS_PER_MONITOR_DPI_AWARE")
+except Exception:
     try:
-        from pywinauto import Desktop  # type: ignore
-        elem = Desktop(backend="uia").from_point(x, y)
-        try:
-            elem.invoke()
-            logging.info(f"[desktop_skill] UIA invoke OK at ({x}, {y})")
-            return True
-        except Exception:
-            pass
-        try:
-            elem.toggle()
-            logging.info(f"[desktop_skill] UIA toggle OK at ({x}, {y})")
-            return True
-        except Exception:
-            pass
-    except Exception as e:
-        logging.debug(f"[desktop_skill] UIA invoke error: {e}")
-    return False
+        ctypes.windll.user32.SetProcessDPIAware()
+        logging.info("[desktop_skill] DPI awareness: SetProcessDPIAware (fallback)")
+    except Exception:
+        logging.warning("[desktop_skill] DPI awareness: failed to set")
 
 
-def _diagnose_cursor(x: int, y: int) -> dict:
-    """
-    SetCursorPos 동작 여부와 ClipCursor 제한 여부를 진단합니다.
-    실제 클릭과 무관하게 진단 정보만 수집합니다.
-    """
-    # ClipCursor 확인 (사내 정책 또는 앱이 마우스를 특정 영역에 가두는지)
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-
-    clip_rect = RECT()
-    ctypes.windll.user32.GetClipCursor(ctypes.byref(clip_rect))
-    clip_info = f"({clip_rect.left},{clip_rect.top})-({clip_rect.right},{clip_rect.bottom})"
-
-    before = _cursor_pos()
-    ret = ctypes.windll.user32.SetCursorPos(x, y)  # BOOL 반환값 체크
-    time.sleep(0.05)
-    after = _cursor_pos()
-    cursor_ok = abs(after[0] - x) <= 2 and abs(after[1] - y) <= 2
-
-    logging.info(
-        f"[desktop_skill] cursor diag | target=({x},{y}) before={before} after={after} "
-        f"SetCursorPos_ret={ret} cursor_ok={cursor_ok} clip={clip_info}"
-    )
-    return {"cursor_ok": cursor_ok, "cursor_at": after, "clip": clip_info,
-            "set_cursor_pos_ret": ret}
-
+# ── 클릭 helper ──────────────────────────────────────────────────────────────
 
 def _do_click(x: int, y: int, double: bool = False) -> dict:
-    """
-    pyautogui.click(x, y)로 이동+클릭을 SendInput 한 번에 처리합니다.
-    (pyautogui.press와 동일 경로 — SetCursorPos와 별개)
-    SetCursorPos 진단은 별도로 수행해 로그에만 기록합니다.
-    """
-    import pyautogui  # type: ignore
+    """pyautogui.click(x, y)로 클릭합니다. 관리자 권한 CMD에서 실행 필요."""
+    import pyautogui
 
-    # 진단: SetCursorPos가 동작하는지 확인 (클릭과 무관)
-    diag = _diagnose_cursor(x, y)
+    before = pyautogui.position()
+    logging.info(f"[desktop_skill] click target=({x},{y}) cursor_before={before}")
 
-    # 실제 클릭: SendInput으로 이동 + 클릭 (pyautogui.press와 같은 경로)
-    logging.info(f"[desktop_skill] SendInput click at ({x},{y}) double={double}")
     if double:
         pyautogui.doubleClick(x, y)
     else:
         pyautogui.click(x, y)
 
     time.sleep(0.1)
-    after_click = _cursor_pos()
-    logging.info(f"[desktop_skill] cursor after SendInput click={after_click}")
+    after = pyautogui.position()
+    cursor_ok = abs(after[0] - x) <= 2 and abs(after[1] - y) <= 2
+    logging.info(f"[desktop_skill] click done cursor_after={after} ok={cursor_ok}")
 
-    return {"cursor_ok": diag["cursor_ok"], "cursor_at": diag["cursor_at"],
-            "clip": diag["clip"]}
+    return {"cursor_ok": cursor_ok, "cursor_at": (after[0], after[1])}
 
 # 마지막 screenshot 상태 (클릭 미리보기 렌더링에 재사용)
 _element_map: dict[int, dict] = {}
@@ -141,16 +79,22 @@ _last_scale: tuple[float, float] = (1.0, 1.0)  # 캡처 시 DPI 스케일
 
 def _get_dpi_scale() -> tuple[float, float]:
     """
-    ImageGrab 물리 픽셀과 pyautogui 논리 좌표의 비율을 반환.
-    DPI 스케일링(예: 150%)이 걸려 있으면 1.5 등의 값이 나온다.
-    OCR 좌표(물리 px) → pyautogui 클릭 좌표(논리 px) 변환에 사용.
+    ImageGrab 이미지 픽셀과 pyautogui 좌표의 비율을 반환.
+    SetProcessDpiAwareness 호출 후에는 양쪽 다 물리 해상도라 (1.0, 1.0)이 정상.
+    만약 1.0이 아니면 DPI 설정이 적용되지 않은 것이므로 보정에 사용.
     """
     try:
         import pyautogui
-        logical_w, logical_h = pyautogui.size()
+        gui_w, gui_h = pyautogui.size()
         probe = ImageGrab.grab()
-        phys_w, phys_h = probe.size
-        return phys_w / logical_w, phys_h / logical_h
+        img_w, img_h = probe.size
+        scale_x = img_w / gui_w
+        scale_y = img_h / gui_h
+        logging.info(
+            f"[desktop_skill] DPI check: pyautogui=({gui_w}x{gui_h}) "
+            f"ImageGrab=({img_w}x{img_h}) scale=({scale_x:.3f}, {scale_y:.3f})"
+        )
+        return scale_x, scale_y
     except Exception:
         return 1.0, 1.0
 
@@ -458,14 +402,9 @@ class DesktopClickElementSkill(SkillBase):
 
             result: dict = {
                 "status": "success",
-                "message": (
-                    f"요소 {number} ('{el['text']}') 클릭 완료 — 좌표 ({x}, {y}), "
-                    f"커서 이동={'성공' if diag['cursor_ok'] else '실패(좌표 이상)'}"
-                ),
+                "message": f"요소 {number} ('{el['text']}') 클릭 완료 — 좌표 ({x}, {y})",
                 "x": x,
                 "y": y,
-                "cursor_ok": diag["cursor_ok"],
-                "cursor_at": diag["cursor_at"],
                 "elements": {str(n): info["text"] for n, info in new_map.items()},
             }
             # 이미지는 orchestrator가 images_base64 리스트로 처리
@@ -511,19 +450,14 @@ class DesktopClickXYSkill(SkillBase):
         logging.info(f"[desktop_skill] desktop_click_xy: ({x}, {y}) double={double_click}")
         try:
             loop = asyncio.get_event_loop()
-            diag = await loop.run_in_executor(
+            await loop.run_in_executor(
                 None, lambda: _do_click(int(x), int(y), double=double_click)
             )
             await asyncio.sleep(0.3)
             action = "더블클릭" if double_click else "클릭"
             return {
                 "status": "success",
-                "message": (
-                    f"좌표 ({int(x)}, {int(y)}) {action} 완료, "
-                    f"커서 이동={'성공' if diag['cursor_ok'] else '실패(좌표 이상)'}"
-                ),
-                "cursor_ok": diag["cursor_ok"],
-                "cursor_at": diag["cursor_at"],
+                "message": f"좌표 ({int(x)}, {int(y)}) {action} 완료",
             }
         except Exception as e:
             logging.error(f"[desktop_skill] desktop_click_xy failed: {e}", exc_info=True)
@@ -567,100 +501,3 @@ class DesktopTypeSkill(SkillBase):
         except Exception as e:
             logging.error(f"[desktop_skill] desktop_type failed: {e}", exc_info=True)
             return {"status": "error", "message": f"텍스트 입력 오류: {e}"}
-
-
-# ── 스킬 5: 마우스 이동 (진단용) ─────────────────────────────────────────────
-
-class DesktopMouseMoveSkill(SkillBase):
-    name = "desktop_mouse_move"
-    description = (
-        "클릭 없이 마우스 커서만 지정 좌표로 이동합니다. "
-        "클릭이 안 될 때 좌표가 올바른지 눈으로 확인하는 진단용 스킬입니다. "
-        "커서가 원하는 위치로 이동하면 좌표는 맞고 권한 문제일 가능성이 높습니다. "
-        "커서가 엉뚱한 곳으로 가면 DPI 스케일 문제입니다."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "x": {"type": "number", "description": "이동할 X 좌표 (논리 픽셀)"},
-            "y": {"type": "number", "description": "이동할 Y 좌표 (논리 픽셀)"},
-        },
-        "required": ["x", "y"],
-    }
-
-    async def run(self, x: float, y: float, **kwargs) -> dict:
-        logging.info(f"[desktop_skill] desktop_mouse_move: ({x}, {y})")
-        try:
-            loop = asyncio.get_event_loop()
-            diag = await loop.run_in_executor(None, lambda: _diagnose_cursor(int(x), int(y)))
-            if diag["cursor_ok"]:
-                msg = f"커서가 ({int(x)}, {int(y)})로 이동했습니다. 좌표 정확."
-            else:
-                msg = (
-                    f"SetCursorPos 반환={diag['set_cursor_pos_ret']}, "
-                    f"실제 커서={diag['cursor_at']} (목표={int(x)},{int(y)}). "
-                    f"ClipCursor 영역={diag['clip']}. "
-                    + ("ClipCursor로 커서가 제한된 것 같습니다."
-                       if diag['set_cursor_pos_ret'] else "SetCursorPos 자체가 실패했습니다.")
-                )
-            return {
-                "status": "success",
-                "target": (int(x), int(y)),
-                "cursor_at": diag["cursor_at"],
-                "cursor_ok": diag["cursor_ok"],
-                "set_cursor_pos_ret": diag["set_cursor_pos_ret"],
-                "clip": diag["clip"],
-                "message": msg,
-            }
-        except Exception as e:
-            logging.error(f"[desktop_skill] desktop_mouse_move failed: {e}", exc_info=True)
-            return {"status": "error", "message": f"마우스 이동 오류: {e}"}
-
-
-# ── 스킬 6: UIA 클릭 (elevated 앱 대응) ──────────────────────────────────────
-
-class DesktopUiaClickXYSkill(SkillBase):
-    name = "desktop_uia_click_xy"
-    description = (
-        "UIA(UI Automation) InvokePattern으로 좌표의 요소를 클릭합니다. "
-        "pyautogui 클릭(SendInput)이 권한 문제(UIPI)로 차단될 때 사용하세요. "
-        "관리자 권한으로 실행 중인 앱(EES UI 등)의 버튼 클릭에 효과적입니다."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "x": {"type": "number", "description": "클릭할 X 좌표 (논리 픽셀)"},
-            "y": {"type": "number", "description": "클릭할 Y 좌표 (논리 픽셀)"},
-        },
-        "required": ["x", "y"],
-    }
-
-    async def run(self, x: float, y: float, **kwargs) -> dict:
-        logging.info(f"[desktop_skill] desktop_uia_click_xy: ({x}, {y})")
-        try:
-            # 커서를 먼저 이동해 시각적으로 위치 확인 가능하게 함
-            loop = asyncio.get_event_loop()
-            actual = await loop.run_in_executor(None, lambda: _move_cursor(int(x), int(y)))
-            await asyncio.sleep(0.1)
-
-            ok = await loop.run_in_executor(None, lambda: _try_uia_invoke(int(x), int(y)))
-            await asyncio.sleep(0.3)
-
-            if ok:
-                return {
-                    "status": "success",
-                    "message": f"UIA 클릭 완료 — 좌표 ({int(x)}, {int(y)}), 커서 위치={actual}",
-                    "cursor_at": actual,
-                }
-            else:
-                return {
-                    "status": "not_invoked",
-                    "message": (
-                        f"좌표 ({int(x)}, {int(y)})의 요소가 InvokePattern을 지원하지 않습니다. "
-                        "서버를 관리자 권한으로 실행한 뒤 desktop_click_xy를 사용해 주세요."
-                    ),
-                    "cursor_at": actual,
-                }
-        except Exception as e:
-            logging.error(f"[desktop_skill] desktop_uia_click_xy failed: {e}", exc_info=True)
-            return {"status": "error", "message": f"UIA 클릭 오류: {e}"}
