@@ -108,7 +108,9 @@ def _focus_window(keyword: str) -> str | None:
         result = _find_window_once(kw)
         if result:
             hwnd, title = result
-            ctypes.windll.user32.ShowWindow(hwnd, 9)
+            # 최소화 상태일 때만 복원 (최대화 상태는 유지)
+            if ctypes.windll.user32.IsIconic(hwnd):
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             ctypes.windll.user32.SetForegroundWindow(hwnd)
             _focused_hwnd = hwnd
             _focused_title = title
@@ -201,47 +203,64 @@ def _ocr_find_target(img: "Image.Image", target: str) -> dict | None:
     if not words:
         return None
 
-    # 2) 전체 문구 매칭: 연속 단어 슬라이딩 윈도우
+    def _make_result(left: int, top: int, right: int, bottom: int, matched: str) -> dict:
+        return {"x": (left + right) // 2, "y": (top + bottom) // 2, "matched": matched}
+
+    # ── 2) 단일 단어 완전 일치 (최우선) ──────────────────────────────────────
+    for w in words:
+        if w["text"].lower() == target_lower:
+            r = _make_result(w["left"], w["top"], w["left"] + w["width"], w["top"] + w["height"], w["text"])
+            logging.info(f"[OCR] exact word match: '{w['text']}' → img({r['x']},{r['y']})")
+            return r
+
+    # ── 3) 구문 완전 일치 (단어 수가 정확히 같고 내용 일치) ──────────────────
     if len(target_words) > 1:
         for i in range(len(words) - len(target_words) + 1):
             window = words[i : i + len(target_words)]
-            # 같은 줄인지 확인
             if any(w["line"] != window[0]["line"] or w["block"] != window[0]["block"] for w in window):
                 continue
             joined = " ".join(w["text"] for w in window).lower()
-            if target_lower in joined:
+            if joined == target_lower:
                 left = min(w["left"] for w in window)
                 top = min(w["top"] for w in window)
                 right = max(w["left"] + w["width"] for w in window)
                 bottom = max(w["top"] + w["height"] for w in window)
-                cx = (left + right) // 2
-                cy = (top + bottom) // 2
-                logging.info(f"[OCR] phrase match: '{joined}' → img({cx},{cy})")
-                return {"x": cx, "y": cy, "matched": joined}
+                r = _make_result(left, top, right, bottom, " ".join(w["text"] for w in window))
+                logging.info(f"[OCR] exact phrase match: '{r['matched']}' → img({r['x']},{r['y']})")
+                return r
 
-    # 3) 단일 단어 / 부분 매칭 (fallback)
+    # ── 4) 구문 포함 매칭 (target이 구문에 포함됨) ───────────────────────────
+    if len(target_words) > 1:
+        for wlen in range(len(target_words), len(target_words) + 3):
+            for i in range(len(words) - wlen + 1):
+                window = words[i : i + wlen]
+                if any(w["line"] != window[0]["line"] or w["block"] != window[0]["block"] for w in window):
+                    continue
+                joined = " ".join(w["text"] for w in window).lower()
+                if target_lower in joined:
+                    left = min(w["left"] for w in window)
+                    top = min(w["top"] for w in window)
+                    right = max(w["left"] + w["width"] for w in window)
+                    bottom = max(w["top"] + w["height"] for w in window)
+                    r = _make_result(left, top, right, bottom, " ".join(w["text"] for w in window))
+                    logging.info(f"[OCR] phrase contains match: '{r['matched']}' → img({r['x']},{r['y']})")
+                    return r
+
+    # ── 5) 단일 단어 부분 매칭 (fallback) ────────────────────────────────────
     best = None
-    best_score = 0
+    best_score = 0.0
     for w in words:
         wt = w["text"].lower()
-        # 완전 일치
-        if target_lower == wt:
-            cx = w["left"] + w["width"] // 2
-            cy = w["top"] + w["height"] // 2
-            logging.info(f"[OCR] exact match: '{w['text']}' → img({cx},{cy})")
-            return {"x": cx, "y": cy, "matched": w["text"]}
-        # 포함 매칭
         if target_lower in wt or wt in target_lower:
-            score = len(wt) / len(target_lower) if len(target_lower) > 0 else 0
+            score = len(wt) / len(target_lower) if target_lower else 0
             if score > best_score:
                 best_score = score
                 best = w
 
     if best and best_score > 0.3:
-        cx = best["left"] + best["width"] // 2
-        cy = best["top"] + best["height"] // 2
-        logging.info(f"[OCR] partial match ({best_score:.2f}): '{best['text']}' → img({cx},{cy})")
-        return {"x": cx, "y": cy, "matched": best["text"]}
+        r = _make_result(best["left"], best["top"], best["left"] + best["width"], best["top"] + best["height"], best["text"])
+        logging.info(f"[OCR] partial match ({best_score:.2f}): '{r['matched']}' → img({r['x']},{r['y']})")
+        return r
 
     return None
 
