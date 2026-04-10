@@ -77,22 +77,20 @@ _last_scale: tuple[float, float] = (1.0, 1.0)  # 캡처 시 DPI 스케일
 
 # ── DPI 스케일 보정 ───────────────────────────────────────────────────────────
 
-def _get_dpi_scale() -> tuple[float, float]:
+def _get_dpi_scale(img: "Image.Image") -> tuple[float, float]:
     """
-    ImageGrab 이미지 픽셀과 pyautogui 좌표의 비율을 반환.
-    SetProcessDpiAwareness 호출 후에는 양쪽 다 물리 해상도라 (1.0, 1.0)이 정상.
-    만약 1.0이 아니면 DPI 설정이 적용되지 않은 것이므로 보정에 사용.
+    캡처된 이미지 크기와 pyautogui 좌표 공간의 비율을 반환.
+    동일한 이미지를 사용하므로 크기 불일치 가능성 없음.
     """
     try:
         import pyautogui
         gui_w, gui_h = pyautogui.size()
-        probe = ImageGrab.grab()
-        img_w, img_h = probe.size
+        img_w, img_h = img.size
         scale_x = img_w / gui_w
         scale_y = img_h / gui_h
         logging.info(
             f"[desktop_skill] DPI check: pyautogui=({gui_w}x{gui_h}) "
-            f"ImageGrab=({img_w}x{img_h}) scale=({scale_x:.3f}, {scale_y:.3f})"
+            f"image=({img_w}x{img_h}) scale=({scale_x:.3f}, {scale_y:.3f})"
         )
         return scale_x, scale_y
     except Exception:
@@ -150,9 +148,10 @@ def _render_overlay(
 ) -> str:
     """
     저장된 원본 이미지에 번호 마커를 오버레이해 base64 PNG로 반환합니다.
-    highlight: 특별히 강조할 요소 번호 (초록 큰 원으로 표시)
+    highlight: 특별히 강조할 요소 번호 (빨간 십자선 + 좌표 표시)
     """
     scale_x, scale_y = scale
+    img_w, img_h = raw_img.size
     img_rgba = raw_img.convert("RGBA")
     overlay = Image.new("RGBA", raw_img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -169,7 +168,11 @@ def _render_overlay(
         phys_y = int(el["y"] * scale_y)
 
         if i == highlight:
-            # 강조: 초록색 큰 원 + 테두리
+            # 빨간 십자선: 클릭할 정확한 위치를 화면 전체에 표시
+            cross_color = (255, 40, 40, 180)
+            draw.line([(phys_x, 0), (phys_x, img_h)], fill=cross_color, width=2)
+            draw.line([(0, phys_y), (img_w, phys_y)], fill=cross_color, width=2)
+            # 강조 원
             r = 16
             draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r],
                          fill=(30, 200, 80, 230), outline=(255, 255, 255, 255), width=2)
@@ -178,9 +181,10 @@ def _render_overlay(
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             draw.text((phys_x - tw / 2, phys_y - th / 2), label,
                       fill=(255, 255, 255, 255), font=font_hl)
-            # 화살표 텍스트
-            draw.text((phys_x + r + 4, phys_y - 8), "← 클릭",
-                      fill=(30, 200, 80, 230), font=font)
+            # 좌표 표시
+            coord_text = f"click→({el['x']},{el['y']})"
+            draw.text((phys_x + r + 4, phys_y - 8), coord_text,
+                      fill=(255, 40, 40, 230), font=font)
         else:
             r = 11
             draw.ellipse([phys_x - r, phys_y - r, phys_x + r, phys_y + r],
@@ -207,9 +211,7 @@ def _build_annotated_screenshot() -> tuple[str, dict]:
     global _last_raw_img, _last_scale
     img = ImageGrab.grab()  # 전체 모니터 캡처
     _last_raw_img = img.copy()
-    scale_x, scale_y = _get_dpi_scale()
-    logging.info(f"[desktop_skill] DPI scale: x={scale_x:.3f} y={scale_y:.3f}, "
-                 f"captured={img.size}")
+    scale_x, scale_y = _get_dpi_scale(img)  # 동일 이미지로 scale 계산
 
     _last_scale = (scale_x, scale_y)
     elements: list[dict] = []
@@ -402,9 +404,13 @@ class DesktopClickElementSkill(SkillBase):
 
             result: dict = {
                 "status": "success",
-                "message": f"요소 {number} ('{el['text']}') 클릭 완료 — 좌표 ({x}, {y})",
+                "message": (
+                    f"요소 {number} ('{el['text']}') 클릭 — "
+                    f"목표=({x},{y}) 커서결과=({diag['cursor_at'][0]},{diag['cursor_at'][1]})"
+                ),
                 "x": x,
                 "y": y,
+                "cursor_at": diag["cursor_at"],
                 "elements": {str(n): info["text"] for n, info in new_map.items()},
             }
             # 이미지는 orchestrator가 images_base64 리스트로 처리
