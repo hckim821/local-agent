@@ -2,7 +2,6 @@
 데스크탑 제어 스킬 모음
 
 멀티모달 LLM이 스크린샷을 직접 보고 클릭 좌표를 판단합니다.
-OCR 의존 없이 pyautogui 좌표 공간에서 캡처+클릭을 처리합니다.
 
 흐름
 ----
@@ -24,16 +23,28 @@ import time
 from PIL import Image
 from .skill_base import SkillBase
 
+# ── DPI awareness 설정 ────────────────────────────────────────────────────────
+# GetWindowRect, ImageGrab, SetCursorPos가 모두 동일한 물리 좌표를 사용하도록 강제.
+# 이 설정이 없으면 Windows 배율(125%, 150% 등)에서 API마다 좌표가 달라짐.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    logging.info("[desktop] DPI: PROCESS_PER_MONITOR_DPI_AWARE")
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+        logging.info("[desktop] DPI: SetProcessDPIAware (fallback)")
+    except Exception:
+        logging.warning("[desktop] DPI: failed to set")
+
 _JPEG_QUALITY = 80
 
 # 포커스된 창 정보
 _focused_hwnd: int | None = None
-_focused_rect: tuple[int, int, int, int] | None = None  # (left, top, right, bottom)
 _focused_title: str | None = None
 
 # 마지막 스크린샷 정보 (클릭 좌표 변환에 사용)
-_last_offset: tuple[int, int] = (0, 0)      # 캡처 영역의 pyautogui 좌표 (left, top)
-_last_scale: tuple[float, float] = (1.0, 1.0)  # 이미지 px / pyautogui 좌표
+_last_offset: tuple[int, int] = (0, 0)       # client area 화면 좌상단 좌표
+_last_scale: tuple[float, float] = (1.0, 1.0)  # 이미지 픽셀 / 화면 좌표 비율
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -45,9 +56,30 @@ def _img_to_b64(img: "Image.Image") -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def _get_client_bbox(hwnd: int) -> tuple[int, int, int, int]:
+    """
+    GetClientRect + ClientToScreen으로 client area(제목줄·테두리 제외)의
+    화면 절대 좌표를 반환합니다.
+    LLM이 보는 이미지 = client area이므로 좌표가 정확히 일치합니다.
+    """
+    client = ctypes.wintypes.RECT()
+    if not ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(client)):
+        raise RuntimeError("GetClientRect failed")
+
+    pt = ctypes.wintypes.POINT(client.left, client.top)
+    if not ctypes.windll.user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+        raise RuntimeError("ClientToScreen failed")
+
+    left = pt.x
+    top = pt.y
+    right = left + (client.right - client.left)
+    bottom = top + (client.bottom - client.top)
+    return (left, top, right, bottom)
+
+
 def _focus_window(keyword: str) -> str | None:
-    """keyword를 포함하는 창을 찾아 포그라운드로 가져옴. HWND/RECT 저장."""
-    global _focused_hwnd, _focused_rect, _focused_title
+    """keyword를 포함하는 창을 찾아 포그라운드로 가져옴."""
+    global _focused_hwnd, _focused_title
 
     found: list[tuple[int, str]] = []
     kw = keyword.lower()
@@ -72,72 +104,73 @@ def _focus_window(keyword: str) -> str | None:
     ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
 
     if not found:
-        _focused_hwnd = _focused_rect = _focused_title = None
+        _focused_hwnd = _focused_title = None
         return None
 
     hwnd, title = found[0]
     ctypes.windll.user32.ShowWindow(hwnd, 9)        # SW_RESTORE
     ctypes.windll.user32.SetForegroundWindow(hwnd)
 
-    rect = ctypes.wintypes.RECT()
-    ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
     _focused_hwnd = hwnd
-    _focused_rect = (rect.left, rect.top, rect.right, rect.bottom)
     _focused_title = title
 
-    logging.info(f"[desktop] focused: hwnd={hwnd} rect={_focused_rect} title={title!r}")
+    client_bbox = _get_client_bbox(hwnd)
+    logging.info(f"[desktop] focused: hwnd={hwnd} client_bbox={client_bbox} title={title!r}")
     return title
 
 
 def _capture() -> "Image.Image":
     """
-    포커스 창 영역을 ImageGrab.grab(bbox=...)으로 캡처합니다.
-    bbox는 가상 화면 좌표 → 어느 모니터든 캡처 가능 (듀얼 모니터 대응).
-    DPI 스케일은 bbox 크기 vs 이미지 크기로 자동 계산.
+    포커스 창의 client area를 ImageGrab.grab(bbox=...)으로 캡처합니다.
+    - client area = 제목줄·테두리·그림자 제외 → LLM이 보는 영역과 정확히 일치
+    - bbox는 가상 화면 좌표 → 어느 모니터든 캡처 가능
+    - DPI scale = img.size / bbox 크기 로 자동 계산
+      (DPI-aware 성공 시 1.0, 실패 시 1.25/1.5 등)
     """
-    global _last_offset, _last_scale, _focused_rect, _focused_hwnd
+    global _last_offset, _last_scale
     from PIL import ImageGrab
 
-    offset_x, offset_y = 0, 0
-    bbox = None  # (left, top, right, bottom) 가상 화면 좌표
-
     if _focused_hwnd is not None:
-        rect = ctypes.wintypes.RECT()
-        if ctypes.windll.user32.GetWindowRect(_focused_hwnd, ctypes.byref(rect)):
-            _focused_rect = (rect.left, rect.top, rect.right, rect.bottom)
-            bbox = _focused_rect
-            offset_x, offset_y = rect.left, rect.top
+        try:
+            bbox = _get_client_bbox(_focused_hwnd)
+        except Exception as e:
+            logging.warning(f"[desktop] GetClientRect failed: {e}, using full screen")
+            bbox = None
+    else:
+        bbox = None
 
     if bbox:
         img = ImageGrab.grab(bbox=bbox)
+        _last_offset = (bbox[0], bbox[1])
+        # bbox 면적 vs 이미지 크기로 DPI scale 자동 계산
         bbox_w = bbox[2] - bbox[0]
         bbox_h = bbox[3] - bbox[1]
+        scale_x = img.size[0] / bbox_w if bbox_w else 1.0
+        scale_y = img.size[1] / bbox_h if bbox_h else 1.0
     else:
         img = ImageGrab.grab(all_screens=True)
-        # 가상 화면 원점 (보조 모니터가 왼쪽이면 음수)
-        offset_x = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
-        offset_y = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
-        bbox_w = ctypes.windll.user32.GetSystemMetrics(78)    # SM_CXVIRTUALSCREEN
-        bbox_h = ctypes.windll.user32.GetSystemMetrics(79)    # SM_CYVIRTUALSCREEN
+        virt_x = ctypes.windll.user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        virt_y = ctypes.windll.user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        virt_w = ctypes.windll.user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        virt_h = ctypes.windll.user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+        _last_offset = (virt_x, virt_y)
+        scale_x = img.size[0] / virt_w if virt_w else 1.0
+        scale_y = img.size[1] / virt_h if virt_h else 1.0
 
-    img_w, img_h = img.size
-    scale_x = img_w / bbox_w if bbox_w else 1.0
-    scale_y = img_h / bbox_h if bbox_h else 1.0
-
-    _last_offset = (offset_x, offset_y)
     _last_scale = (scale_x, scale_y)
 
     logging.info(
-        f"[desktop] captured: img={img.size} bbox_area=({bbox_w}x{bbox_h}) "
-        f"offset=({offset_x},{offset_y}) scale=({scale_x:.3f},{scale_y:.3f})"
+        f"[desktop] captured: img={img.size} offset={_last_offset} "
+        f"scale=({scale_x:.3f},{scale_y:.3f}) bbox={bbox}"
     )
     return img
 
 
 def _img_to_screen(img_x: int, img_y: int) -> tuple[int, int]:
     """
-    이미지 내 좌표 → 가상 화면 절대 좌표 (SetCursorPos에 사용).
-    이미지 픽셀이 DPI로 스케일되어 있으면 나눠서 보정.
+    이미지 내 좌표 → 화면 절대 좌표 (SetCursorPos에 사용).
+    이미지 픽셀을 scale로 나눠서 화면 좌표로 변환 후 offset 가산.
+    scale=1.0이면 나눗셈은 no-op.
     """
     sx, sy = _last_scale
     screen_x = int(img_x / sx) + _last_offset[0]
@@ -174,7 +207,6 @@ class DesktopFocusWindowSkill(SkillBase):
                 return {
                     "status": "success",
                     "window_title": title,
-                    "window_rect": _focused_rect,
                     "message": f"'{title}' 창을 포그라운드로 가져왔습니다.",
                 }
             return {
@@ -191,7 +223,7 @@ class DesktopFocusWindowSkill(SkillBase):
 class DesktopScreenshotSkill(SkillBase):
     name = "desktop_screenshot"
     description = (
-        "포커스된 창(또는 전체 화면)의 스크린샷을 찍어 반환합니다. "
+        "포커스된 창의 클라이언트 영역(제목줄·테두리 제외) 스크린샷을 찍어 반환합니다. "
         "이미지의 좌상단이 (0,0)이고 우하단이 (width,height)입니다. "
         "클릭할 위치를 이미지 내 (x, y) 좌표로 파악한 뒤 "
         "desktop_click_xy에 전달하세요."
@@ -227,6 +259,8 @@ class DesktopClickXYSkill(SkillBase):
         "desktop_screenshot 이미지 내 좌표 (x, y)를 클릭합니다. "
         "이미지 왼쪽 상단이 (0, 0)입니다. "
         "스크린샷에서 클릭할 위치의 x, y 좌표를 전달하세요. "
+        "move_only=true로 설정하면 클릭 없이 커서만 이동하고 스크린샷을 반환합니다. "
+        "커서 위치가 맞는지 확인할 때 사용하세요. "
         "클릭 후 새 스크린샷을 자동으로 찍어 반환합니다."
     )
     parameters = {
@@ -238,44 +272,57 @@ class DesktopClickXYSkill(SkillBase):
                 "type": "boolean",
                 "description": "더블클릭 여부 (기본값: false)",
             },
+            "move_only": {
+                "type": "boolean",
+                "description": "true면 커서만 이동하고 클릭하지 않음 (디버깅용, 기본값: false)",
+            },
         },
         "required": ["x", "y"],
     }
 
-    async def run(self, x: int, y: int, double_click: bool = False, **kwargs) -> dict:
-        import pyautogui
-
-        logging.info(f"[desktop] click_xy: img=({x},{y}) double={double_click}")
+    async def run(
+        self, x: int, y: int,
+        double_click: bool = False, move_only: bool = False,
+        **kwargs,
+    ) -> dict:
+        logging.info(f"[desktop] click_xy: img=({x},{y}) double={double_click} move_only={move_only}")
         try:
-            # 이미지 좌표 → 가상 화면 절대 좌표
             screen_x, screen_y = _img_to_screen(x, y)
             logging.info(
-                f"[desktop] img({x},{y}) / scale{_last_scale} + offset{_last_offset} "
-                f"→ screen({screen_x},{screen_y})"
+                f"[desktop] img({x},{y}) + offset{_last_offset} → screen({screen_x},{screen_y})"
             )
 
-            # SetCursorPos(가상 화면 좌표, 듀얼 모니터 대응) + click(현재 위치)
             loop = asyncio.get_event_loop()
-            def do_click():
+
+            def do_action():
                 ctypes.windll.user32.SetCursorPos(screen_x, screen_y)
                 time.sleep(0.05)
-                if double_click:
-                    pyautogui.doubleClick()
-                else:
-                    pyautogui.click()
+                if not move_only:
+                    import pyautogui
+                    if double_click:
+                        pyautogui.doubleClick()
+                    else:
+                        pyautogui.click()
                 time.sleep(0.1)
-                pos = pyautogui.position()
-                logging.info(f"[desktop] cursor after click: {pos}")
-                return pos
+                # 최종 커서 위치 확인
+                pt = ctypes.wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                return (pt.x, pt.y)
 
-            cursor = await loop.run_in_executor(None, do_click)
+            cursor = await loop.run_in_executor(None, do_action)
             await asyncio.sleep(0.5)
 
-            # 클릭 후 스크린샷
+            # 결과 스크린샷 (커서 위치가 보임)
             after_img = await loop.run_in_executor(None, _capture)
             after_b64 = await loop.run_in_executor(None, _img_to_b64, after_img)
 
-            action = "더블클릭" if double_click else "클릭"
+            if move_only:
+                action = "커서 이동만"
+            elif double_click:
+                action = "더블클릭"
+            else:
+                action = "클릭"
+
             return {
                 "status": "success",
                 "message": (
