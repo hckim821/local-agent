@@ -7,10 +7,15 @@ from typing import AsyncGenerator
 # ── Thought-block filter ──────────────────────────────────────────────────────
 # 일부 로컬 모델(Qwen3 등)이 내부 추론 과정을 특수 태그로 출력함.
 # 스트리밍 도중 이 블록을 감지해 서버 로그에만 기록하고 클라이언트엔 전달하지 않음.
+
+# thought 모드 진입 태그
 _THINK_OPENS = ("<|channel>thought", "<think>")
+# thought 모드 종료 태그
 _THINK_CLOSES = ("</thought>", "</think>")
-# <|channel>answer 등 다음 채널 마커: <|channel> 뒤에 오는 단어+개행까지 통째로 제거
-_NEXT_CHANNEL_RE = re.compile(r"<\|channel>[^\n<]*\n?")
+# <|channel>XXX 파서: channel 이름을 캡처 그룹으로 추출
+_CHANNEL_RE = re.compile(r"<\|channel\|?>(\w*)\n?")
+# thought 계열 채널 이름 (이 이름이면 thought 모드 유지)
+_THOUGHT_CHANNELS = {"thought", "think", "thinking"}
 
 
 def _longest_open_suffix(text: str) -> int:
@@ -21,6 +26,20 @@ def _longest_open_suffix(text: str) -> int:
             if text.endswith(tag[:length]):
                 best = max(best, length)
     return best
+
+
+def _strip_thought_blocks(text: str) -> str:
+    """blocking_chat용: 완성된 텍스트에서 thought 블록을 일괄 제거."""
+    # <think>...</think>
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # <|channel>thought ... <|channel>answer (또는 끝)
+    text = re.sub(
+        r"<\|channel\|?>thought\b.*?(?=<\|channel\|?>\w|$)",
+        "", text, flags=re.DOTALL,
+    )
+    # 남은 <|channel>answer 등 마커 제거
+    text = _CHANNEL_RE.sub("", text)
+    return text.strip()
 
 
 class LLMConnector:
@@ -47,7 +66,12 @@ class LLMConnector:
         tools: list | None = None,
     ) -> dict:
         """Non-streaming call. Returns {"content": str, "tool_calls": [...]}."""
-        payload = {"model": model, "messages": messages, "stream": False}
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "chat_template_kwargs": {"thinking": False},
+        }
         if tools:
             payload["tools"] = tools
 
@@ -73,6 +97,7 @@ class LLMConnector:
                 "arguments": args,
             })
 
+        content = _strip_thought_blocks(content)
         return {"content": content, "tool_calls": parsed}
 
     async def stream_tokens(
@@ -86,7 +111,12 @@ class LLMConnector:
           {"type": "content", "value": str}   — one token from the LLM
           {"type": "tool_calls", "value": [...]} — accumulated tool calls at end of stream
         """
-        payload = {"model": model, "messages": messages, "stream": True}
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "chat_template_kwargs": {"thinking": False},
+        }
         if tools:
             payload["tools"] = tools
 
@@ -119,43 +149,43 @@ class LLMConnector:
                         content = delta.get("content")
                         if content:
                             if in_thought:
-                                # thought 블록 누적 → 닫는 태그 탐색
                                 thought_acc += content
+                                # ── thought 블록 내부: 닫는 태그 탐색 ────────
                                 close_found = False
+                                # 1) </thought>, </think> 명시적 닫기
                                 for close in _THINK_CLOSES:
                                     pos = thought_acc.find(close)
                                     if pos != -1:
-                                        logging.info(
-                                            "[LLM thought] %s",
-                                            thought_acc[:pos].strip(),
-                                        )
+                                        logging.info("[LLM thought] %s", thought_acc[:pos].strip())
                                         remainder = thought_acc[pos + len(close):]
                                         thought_acc = ""
                                         in_thought = False
                                         close_found = True
-                                        # 닫힌 뒤 남은 텍스트에 <|channel>answer 같은
-                                        # 채널 마커가 있으면 제거
-                                        remainder = _NEXT_CHANNEL_RE.sub("", remainder)
+                                        # 나머지에서 채널 마커 제거
+                                        remainder = _CHANNEL_RE.sub("", remainder)
                                         pending += remainder
                                         break
-                                # <|channel>XXX 형태의 다음 채널 마커도 닫기로 처리
+                                # 2) <|channel>XXX — 채널 이름에 따라 분기
                                 if not close_found:
-                                    m = _NEXT_CHANNEL_RE.search(thought_acc)
-                                    if m and not thought_acc.startswith(m.group()):
-                                        # 마커 앞까지가 thought 내용
-                                        pos = m.start()
-                                        logging.info(
-                                            "[LLM thought] %s",
-                                            thought_acc[:pos].strip(),
-                                        )
-                                        remainder = thought_acc[m.end():]
-                                        thought_acc = ""
-                                        in_thought = False
-                                        pending += remainder
+                                    m = _CHANNEL_RE.search(thought_acc)
+                                    if m:
+                                        channel_name = m.group(1).lower()
+                                        if channel_name in _THOUGHT_CHANNELS:
+                                            # thought 계열 → thought 모드 유지, 기존 내용만 로그
+                                            if m.start() > 0:
+                                                logging.info("[LLM thought] %s", thought_acc[:m.start()].strip())
+                                            thought_acc = thought_acc[m.end():]
+                                        else:
+                                            # answer 등 다른 채널 → thought 종료
+                                            logging.info("[LLM thought] %s", thought_acc[:m.start()].strip())
+                                            remainder = thought_acc[m.end():]
+                                            thought_acc = ""
+                                            in_thought = False
+                                            pending += remainder
                             else:
                                 pending += content
 
-                            # thought 블록 밖: pending에서 OPEN 태그 탐색 후 안전 구간 yield
+                            # ── thought 블록 밖: OPEN 태그 탐색 후 안전 구간 yield ──
                             if not in_thought:
                                 for open_tag in _THINK_OPENS:
                                     op = pending.find(open_tag)
