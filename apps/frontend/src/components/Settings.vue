@@ -1,7 +1,7 @@
 <template>
   <a-modal
     v-model:open="store.showSettings"
-    title="LLM 설정"
+    title="설정"
     :footer="null"
     :width="480"
     :bodyStyle="{ padding: '24px' }"
@@ -48,6 +48,24 @@
         </a-input>
       </a-form-item>
 
+      <a-divider style="border-color: #2d3148; margin: 12px 0" />
+
+      <a-form-item
+        label="LLM Wiki 경로"
+        name="wikiPath"
+        :extra="store.settings.wikiPath ? undefined : '설정하면 위키 검색·읽기·쓰기 스킬이 활성화됩니다'"
+      >
+        <a-input
+          v-model:value="store.settings.wikiPath"
+          placeholder="D:\obsidian\llm-wiki"
+          allow-clear
+        >
+          <template #prefix>
+            <FolderOpenOutlined class="text-gray-500" />
+          </template>
+        </a-input>
+      </a-form-item>
+
       <a-form-item class="mb-0">
         <div class="flex gap-2 justify-end">
           <a-button @click="store.showSettings = false">Cancel</a-button>
@@ -62,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { LinkOutlined, KeyOutlined, RobotOutlined, SaveOutlined } from '@ant-design/icons-vue'
+import { LinkOutlined, KeyOutlined, RobotOutlined, SaveOutlined, FolderOpenOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { useChatStore } from '@/stores/chat'
 
@@ -109,5 +127,12 @@ function handleSave() {
 }
 .settings-form :deep(.ant-input-clear-icon) {
   color: #6b7280;
+}
+.settings-form :deep(.ant-form-item-extra) {
+  color: #4b5563;
+  font-size: 12px;
+}
+.settings-form :deep(.ant-divider) {
+  border-color: #2d3148;
 }
 </style>

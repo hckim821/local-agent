@@ -9,13 +9,21 @@ export function createApiClient(settings: Settings) {
     headers: {
       'Content-Type': 'application/json',
       'X-LLM-Endpoint': settings.endpointUrl,
-      'X-LLM-Key': settings.apiKey
+      'X-LLM-Key': settings.apiKey,
+      ...(settings.wikiPath ? { 'X-Wiki-Path': settings.wikiPath } : {})
     }
   })
 }
 
 export async function fetchSkills() {
   const res = await axios.get(`${BASE_URL}/api/skills`)
+  return res.data
+}
+
+export async function connectWiki(wikiPath: string | null) {
+  const res = await axios.post(`${BASE_URL}/api/wiki/connect`, null, {
+    headers: wikiPath ? { 'X-Wiki-Path': wikiPath } : {}
+  })
   return res.data
 }
 
@@ -35,7 +43,8 @@ export async function* streamChat(
     headers: {
       'Content-Type': 'application/json',
       'X-LLM-Endpoint': settings.endpointUrl,
-      'X-LLM-Key': settings.apiKey
+      'X-LLM-Key': settings.apiKey,
+      ...(settings.wikiPath ? { 'X-Wiki-Path': settings.wikiPath } : {})
     },
     body: JSON.stringify({
       messages,

@@ -26,6 +26,7 @@ export interface Settings {
   endpointUrl: string
   apiKey: string
   model: string
+  wikiPath: string
 }
 
 export interface Skill {

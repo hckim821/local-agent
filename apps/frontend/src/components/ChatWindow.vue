@@ -85,7 +85,7 @@
         <!-- Input area -->
         <div
           class="px-4 py-3 border-t border-gray-800 bg-[#13151f]"
-          style="flex-shrink: 0;"
+          style="flex-shrink: 0; position: relative;"
         >
           <!-- Image preview -->
           <div v-if="attachedImage" class="mb-2 flex items-start gap-2">
@@ -103,15 +103,33 @@
             <span class="text-xs text-gray-500 mt-1">이미지 첨부됨</span>
           </div>
 
+          <!-- Skill autocomplete popup -->
+          <div
+            v-if="skillPopup.show && skillPopup.items.length > 0"
+            class="skill-popup"
+          >
+            <div
+              v-for="(skill, idx) in skillPopup.items"
+              :key="skill.name"
+              class="skill-popup-item"
+              :class="{ active: idx === skillPopup.activeIdx }"
+              @mousedown.prevent="selectSkillSuggestion(skill.name)"
+            >
+              <span class="skill-popup-name">/{{ skill.name }}</span>
+              <span class="skill-popup-desc">{{ skill.description }}</span>
+            </div>
+          </div>
+
           <div class="flex gap-2 items-end">
             <a-textarea
               v-model:value="inputText"
-              placeholder="Type a message... (Enter to send, Shift+Enter for newline, Ctrl+V로 이미지 첨부)"
+              placeholder="Type a message... (Enter to send, Shift+Enter for newline, Ctrl+V로 이미지 첨부, /로 스킬 검색)"
               :auto-size="{ minRows: 1, maxRows: 6 }"
               :disabled="store.isLoading"
               class="flex-1 chat-input"
               @keydown="handleKeydown"
               @paste="handlePaste"
+              @input="handleInput"
             />
             <a-button
               type="primary"
@@ -172,6 +190,29 @@ const attachedImage = ref<string | null>(null)
 const messagesContainer = ref<HTMLDivElement | null>(null)
 const showSkillsPanel = ref(false)
 
+const skillPopup = ref({ show: false, query: '', items: [] as typeof store.skills, activeIdx: 0 })
+
+function updateSkillPopup(text: string) {
+  if (!text.startsWith('/')) {
+    skillPopup.value.show = false
+    return
+  }
+  const query = text.slice(1).toLowerCase()
+  const filtered = store.skills.filter(s =>
+    s.name.toLowerCase().includes(query) || s.description.toLowerCase().includes(query)
+  )
+  skillPopup.value = { show: true, query, items: filtered, activeIdx: 0 }
+}
+
+function selectSkillSuggestion(name: string) {
+  inputText.value = `/${name} `
+  skillPopup.value.show = false
+}
+
+function handleInput() {
+  updateSkillPopup(inputText.value)
+}
+
 const lastMessageStreaming = computed(() => {
   const msgs = store.messages
   if (msgs.length === 0) return false
@@ -221,11 +262,33 @@ async function handleSend() {
   if (store.isLoading) return
   inputText.value = ''
   attachedImage.value = null
+  skillPopup.value.show = false
   await nextTick()
   await store.sendMessage(text, image ?? undefined)
 }
 
 async function handleKeydown(e: KeyboardEvent) {
+  if (skillPopup.value.show && skillPopup.value.items.length > 0) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      skillPopup.value.activeIdx = (skillPopup.value.activeIdx + 1) % skillPopup.value.items.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      skillPopup.value.activeIdx = (skillPopup.value.activeIdx - 1 + skillPopup.value.items.length) % skillPopup.value.items.length
+      return
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && skillPopup.value.show)) {
+      e.preventDefault()
+      selectSkillSuggestion(skillPopup.value.items[skillPopup.value.activeIdx].name)
+      return
+    }
+    if (e.key === 'Escape') {
+      skillPopup.value.show = false
+      return
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     await handleSend()
@@ -266,6 +329,50 @@ onMounted(() => {
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
+}
+
+.skill-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 48px;
+  background: #1a1d2b;
+  border: 1px solid #2d3148;
+  border-radius: 10px;
+  overflow: hidden;
+  z-index: 100;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.skill-popup-item {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #252840;
+  transition: background 0.1s;
+}
+.skill-popup-item:last-child {
+  border-bottom: none;
+}
+.skill-popup-item:hover,
+.skill-popup-item.active {
+  background: #252840;
+}
+.skill-popup-name {
+  color: #60a5fa;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: monospace;
+}
+.skill-popup-desc {
+  color: #6b7280;
+  font-size: 11px;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .slide-enter-active,

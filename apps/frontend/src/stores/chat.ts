@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { Message, Settings, Skill } from '@/types'
-import { streamChat, resetChat, fetchSkills } from '@/api/client'
+import { streamChat, resetChat, fetchSkills, connectWiki } from '@/api/client'
 
 export const useChatStore = defineStore('chat', () => {
   const messages = ref<Message[]>([])
@@ -9,7 +9,8 @@ export const useChatStore = defineStore('chat', () => {
   const settings = ref<Settings>({
     endpointUrl: localStorage.getItem('llm_endpoint') || 'http://localhost:11434/v1',
     apiKey: localStorage.getItem('llm_api_key') || 'ollama',
-    model: localStorage.getItem('llm_model') || 'llama3'
+    model: localStorage.getItem('llm_model') || 'llama3',
+    wikiPath: localStorage.getItem('wiki_path') || ''
   })
   const skills = ref<Skill[]>([])
   const showSettings = ref(false)
@@ -18,6 +19,11 @@ export const useChatStore = defineStore('chat', () => {
     localStorage.setItem('llm_endpoint', settings.value.endpointUrl)
     localStorage.setItem('llm_api_key', settings.value.apiKey)
     localStorage.setItem('llm_model', settings.value.model)
+    localStorage.setItem('wiki_path', settings.value.wikiPath)
+    // 위키 경로가 바뀌었으면 서버에 즉시 반영하고 스킬 목록 갱신
+    connectWiki(settings.value.wikiPath || null)
+      .then(data => { if (data?.skills) skills.value = data.skills })
+      .catch(() => {})
   }
 
   async function sendMessage(content: string, image?: string) {
@@ -76,6 +82,11 @@ export const useChatStore = defineStore('chat', () => {
 
   async function loadSkills() {
     try {
+      if (settings.value.wikiPath) {
+        // 위키 경로가 있으면 서버에 위키 스킬을 먼저 등록하고 목록 수신
+        const data = await connectWiki(settings.value.wikiPath)
+        if (data?.skills) { skills.value = data.skills; return }
+      }
       const data = await fetchSkills()
       skills.value = data.skills ?? []
     } catch {}
